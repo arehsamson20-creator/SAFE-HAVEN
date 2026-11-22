@@ -274,39 +274,43 @@ Early exit with penalty. Penalty is split: 30% goes to fee_recipient, 70% accumu
 
 ### Staker Registry Functions
 
-The staker registry allows users to register as stakers and earn a portion of penalties accrued from early deposit exits. This creates an incentive mechanism where stakers share in the penalties paid by users who exit early.
+The staker registry records accounting weights and tracks shares of penalties
+from eligible early exits. See the [Staker Registry User Guide](docs/STAKER_REGISTRY_USER_GUIDE.md)
+for registration and claim walkthroughs, CLI and TypeScript SDK examples,
+calculation details, and limitations of the current implementation.
 
 #### `register_staker(staker, amount) -> Result<(), VaultError>`
-Register or update a staker's stake amount.
+Register or replace a staker's accounting weight. This does not transfer or
+escrow tokens.
 
 **Parameters**
 
 | Parameter | Type | Description |
 |---|---|---|
 | `staker` | `Address` | The staker's address. Must sign the transaction. |
-| `amount` | `i128` | Stake amount in contract tokens (> 0). |
+| `amount` | `i128` | Positive accounting weight used in reward calculations. |
 
 **Returns** `Ok(())` on success, or an error code if validation fails.
 
 **Behavior**
 - Validates that `amount > 0` — zero or negative amounts are rejected with `InvalidStakeAmount`.
 - Updates the staker's entry if already registered, or creates a new entry.
-- Maintains `total_staked` (sum of all registered stakes) for proportional reward calculation.
+- Maintains `total_staked` (sum of registered weights) for reward calculations.
 - Adds the staker to the staker list on first registration.
-- Emits a `StakerRegistered` event.
 - Requires authentication from the staker.
 
 **Example**
 ```rust
-// Alice registers with 1000 tokens as stake
+// Alice registers with an accounting weight of 1000
 vault.register_staker(&alice, &1000)?;
 
-// Later, Alice increases her stake to 2000
+// Later, Alice replaces her weight with 2000
 vault.register_staker(&alice, &2000)?;
 ```
 
 #### `claim_staker_rewards(staker) -> Result<(), VaultError>`
-Claim accumulated rewards from the staker rewards pool.
+Record a claim against the staker rewards pool. The current implementation
+does not transfer tokens and returns unit on success.
 
 **Parameters**
 
@@ -318,27 +322,28 @@ Claim accumulated rewards from the staker rewards pool.
 
 **Behavior**
 - Validates that the staker is registered — returns `StakerNotFound` if not.
-- Calculates the staker's proportional share: `(stake_amount / total_staked) × rewards_pool`.
+- Calculates `floor(stake_amount × current_rewards_pool / total_staked)`.
 - Validates that the calculated reward is > 0 — returns `NoRewardsToClaim` if the pool is empty or the proportion rounds to zero.
 - Deducts the reward from the rewards pool.
 - Tracks cumulative rewards claimed per staker for auditing.
-- Emits a `RewardsClaimed` event.
 - Requires authentication from the staker.
 
 **Example**
 ```rust
-// Alice claims her proportional share of the rewards pool
+// Alice records a claim against the rewards pool
 vault.claim_staker_rewards(&alice)?;
 
-// If Alice has stake 1000 and total_staked is 4000, and rewards_pool is 700:
-// Alice's reward = (1000 / 4000) × 700 = 175 tokens
+// If Alice has weight 1000, total_staked is 4000, and the current pool is 700:
+// The claim accounting amount is floor(1000 × 700 / 4000) = 175.
+// This does not transfer 175 tokens.
 ```
 
 ---
 
 ### Penalty Splitting & Rewards Pool
 
-When a user calls `cancel_deposit()` to exit early, the penalty is split as follows:
+When a user calls `cancel_deposit()` to exit a timestamp- or ledger-based
+deposit early, the penalty is split as follows:
 
 | Recipient | Percentage | Basis Points |
 |---|---|---|
@@ -350,7 +355,11 @@ If a user cancels a deposit with 100 tokens penalty (10% of 1000):
 - Fee Recipient receives 30 tokens (100 × 0.30)
 - Staker Rewards Pool receives 70 tokens (100 × 0.70)
 
-Registered stakers can then claim their proportional share of the rewards pool based on their stake amount relative to total staked.
+The staker share is accumulated in a numeric pool without a token identifier.
+The current claim method updates accounting only; it does not transfer tokens.
+Claim amounts use the remaining pool, so the order of claims affects the
+calculation. See the [Staker Registry User Guide](docs/STAKER_REGISTRY_USER_GUIDE.md)
+for the full walkthrough, SDK example, and limitations.
 
 ---
 
@@ -399,12 +408,16 @@ SAFE-HAVEN tracks environmental impact across all deposits to support ESG goals 
 
 ### Carbon Footprint Tracking
 
-Each deposit automatically calculates a **carbon footprint** based on:
+Each supported deposit automatically calculates a **modeled carbon footprint** based on:
 - **Amount locked** — larger deposits = higher impact
 - **Lock duration** — longer locks = higher impact
-- **Baseline multiplier** — configurable environmental cost per unit-second (default: 1 gram CO2e per unit per second)
+- **Baseline multiplier** — `CARBON_BASELINE_PER_UNIT_SECOND` is currently 1 gram CO2e per token base-unit-second
 
 **Formula**: `carbon_footprint = amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND`
+
+For example, 1,000 units locked for 86,400 seconds (one day) gives
+86,400,000 grams CO2e at the current baseline. This is a protocol estimate,
+not a measurement of actual emissions.
 
 ### Renewable Energy Percentage
 

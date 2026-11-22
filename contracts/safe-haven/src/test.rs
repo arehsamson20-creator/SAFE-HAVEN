@@ -5373,7 +5373,7 @@ fn test_carbon_footprint_calculation() {
     let (env, vault, token, _admin, alice, _fee) = setup();
 
     let now = env.ledger().timestamp();
-    let unlock_time = now + 100; // 100 seconds
+    let unlock_time = now + 86_400; // 1 day
     let amount = 1_000i128;
 
     let deposit_id = vault.deposit(&alice, &token, &amount, &unlock_time, &0)
@@ -5382,9 +5382,65 @@ fn test_carbon_footprint_calculation() {
     let metrics = vault.get_sustainability_metrics(&alice, &deposit_id)
         .expect("metrics should exist");
 
-    // Expected: amount * duration * CARBON_BASELINE_PER_UNIT_SECOND
-    let expected = amount * 100 * CARBON_BASELINE_PER_UNIT_SECOND;
-    assert_eq!(metrics.carbon_footprint, expected, "carbon footprint calculation");
+    let expected = 86_400_000i128;
+    assert_eq!(CARBON_BASELINE_PER_UNIT_SECOND, 1);
+    assert_eq!(metrics.carbon_footprint, expected, "one-day footprint");
+}
+
+#[test]
+fn test_carbon_footprint_varied_amounts_and_durations() {
+    use crate::constants::CARBON_BASELINE_PER_UNIT_SECOND;
+
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let now = env.ledger().timestamp();
+
+    for (amount, duration_secs) in [
+        (250i128, 3_600u64),
+        (2_500i128, 604_800u64),
+        (750i128, 60u64),
+    ] {
+        let deposit_id = vault
+            .deposit(&alice, &token, &amount, &(now + duration_secs), &0)
+            .expect("deposit should succeed");
+        let metrics = vault
+            .get_sustainability_metrics(&alice, &deposit_id)
+            .expect("metrics should be stored for the deposit");
+
+        assert_eq!(
+            metrics.carbon_footprint,
+            amount
+                .saturating_mul(duration_secs as i128)
+                .saturating_mul(CARBON_BASELINE_PER_UNIT_SECOND),
+        );
+    }
+}
+
+#[test]
+fn test_carbon_footprint_max_deposit_and_lock_do_not_overflow() {
+    use crate::constants::{
+        CARBON_BASELINE_PER_UNIT_SECOND, MAX_DEPOSIT_AMOUNT, MAX_LOCK_DURATION_SECS,
+    };
+
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    StellarAssetClient::new(&env, &token).mint(&alice, &MAX_DEPOSIT_AMOUNT);
+
+    let unlock_time = env.ledger().timestamp() + MAX_LOCK_DURATION_SECS;
+    let deposit_id = vault
+        .deposit(
+            &alice,
+            &token,
+            &MAX_DEPOSIT_AMOUNT,
+            &unlock_time,
+            &0,
+        )
+        .expect("maximum supported deposit and lock should succeed");
+    let metrics = vault
+        .get_sustainability_metrics(&alice, &deposit_id)
+        .expect("maximum deposit metrics should be stored");
+
+    let expected = 157_788_000_000_000_000_000_000i128;
+    assert_eq!(CARBON_BASELINE_PER_UNIT_SECOND, 1);
+    assert_eq!(metrics.carbon_footprint, expected);
 }
 
 #[test]

@@ -134,6 +134,8 @@ Include contract redeployment steps, storage migration commands, and frontend up
 
 ### Added
 
+- Staker Registry user guide with registration and claim walkthroughs, penalty and reward calculations, CLI and TypeScript SDK examples, and FAQs
+- Carbon footprint calculation coverage for the specified one-day example, varied inputs, and the maximum deposit/lock values (#66)
 - `deposit_by_ledger(depositor, token, amount, unlock_ledger, penalty_bps)` — locks tokens until a specific Stellar ledger sequence number is reached instead of a wall-clock timestamp; shares the per-depositor deposit-ID counter with timestamp-based deposits (#88)
 - `withdraw_to(depositor, deposit_id, recipient)` — withdraws unlocked tokens to an arbitrary recipient address rather than the depositor; supports both timestamp-based and ledger-based deposits
 - `pause(admin)` / `unpause(admin)` — admin can halt new deposits without affecting existing ones; deposits rejected with `ContractPaused` while paused
