@@ -66,4 +66,7 @@ pub enum VaultError {
     /// Carbon footprint arithmetic would overflow i128 (issue #77).
     /// Returned by the checked carbon calculation helpers.
     CarbonOverflow = 37,
+    /// An active MEV commitment already exists for this deposit (issue #48).
+    /// A deposit may have only one active commit; reveal it before committing again.
+    CommitAlreadyExists = 38,
 }

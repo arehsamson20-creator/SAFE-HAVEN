@@ -9777,6 +9777,416 @@ fn test_frontend_dashboard_queries_stable_and_repeatable() {
         );
     }
 }
+
+// ================================================================
+//  #805 — MEV commitment: non-fungible deposits (one commit per deposit)
+// ================================================================
+
+/// #805 — a deposit can be committed to exactly once while the commit is
+/// still active (not yet revealed).
+#[test]
+fn test_mev_commit_first_commit_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let deposit_id = vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit should succeed");
+
+    let commitment = vault
+        .commit_mev(&alice, &deposit_id)
+        .expect("first commit for a deposit must succeed");
+    assert_eq!(commitment.deposit_id, deposit_id);
+    assert_eq!(commitment.depositor, alice);
+    assert!(!commitment.revealed, "fresh commit must not be revealed");
+}
+
+/// #805 — a second commit for the same deposit before the first is revealed
+/// must fail with `CommitAlreadyExists`.
+#[test]
+fn test_mev_commit_second_commit_before_reveal_fails() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let deposit_id = vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit should succeed");
+
+    vault
+        .commit_mev(&alice, &deposit_id)
+        .expect("first commit should succeed");
+
+    let second = vault.try_commit_mev(&alice, &deposit_id);
+    assert_eq!(
+        second,
+        Err(Ok(VaultError::CommitAlreadyExists)),
+        "second commit before reveal must be rejected"
+    );
+
+    // The original commitment must be untouched (no accidental overwrite).
+    let commitment = vault
+        .get_mev_commitment(&deposit_id)
+        .expect("original commitment must still exist");
+    assert_eq!(commitment.deposit_id, deposit_id);
+    assert!(!commitment.revealed);
+}
+
+/// #805 — the duplicate-commit error must be distinguishable and its
+/// message must clearly describe the problem.
+#[test]
+fn test_mev_duplicate_commit_error_is_clear() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let deposit_id = vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit should succeed");
+
+    vault
+        .commit_mev(&alice, &deposit_id)
+        .expect("first commit should succeed");
+
+    let err = vault
+        .try_commit_mev(&alice, &deposit_id)
+        .expect_err("duplicate commit must fail");
+    let err = err.expect("error must be a contract error");
+
+    assert_eq!(err, VaultError::CommitAlreadyExists);
+    assert_ne!(err, VaultError::DepositNotFound);
+    assert_ne!(err, VaultError::Unauthorized);
+
+    // The error must be human-readable and mention the duplicate commit.
+    let message = std::format!("{:?}", err);
+    assert!(
+        message.contains("Commit") && message.contains("Exists"),
+        "error message should clearly describe a duplicate commit, got: {}",
+        message
+    );
+}
+
+/// #805 — after a commit has been revealed, a new commit for the same
+/// deposit is allowed (commit → reveal → new commit).
+#[test]
+fn test_mev_commit_reveal_then_new_commit_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let deposit_id = vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit should succeed");
+
+    // 1. commit
+    vault
+        .commit_mev(&alice, &deposit_id)
+        .expect("first commit should succeed");
+
+    // 2. reveal
+    let revealed = vault
+        .reveal_mev(&alice, &deposit_id)
+        .expect("reveal should succeed");
+    assert!(revealed.revealed, "commitment must be marked revealed");
+
+    // 3. new commit for the same deposit is now allowed
+    let recommit = vault
+        .commit_mev(&alice, &deposit_id)
+        .expect("new commit after reveal must succeed");
+    assert_eq!(recommit.deposit_id, deposit_id);
+    assert!(!recommit.revealed, "new commit must be active again");
+
+    // And the new commit is again protected against duplicates.
+    assert_eq!(
+        vault.try_commit_mev(&alice, &deposit_id),
+        Err(Ok(VaultError::CommitAlreadyExists))
+    );
+}
+
+/// #805 — commitments are non-fungible: two different deposits can each
+/// hold their own independent active commit.
+#[test]
+fn test_mev_commit_is_per_deposit() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let deposit_a = vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit A should succeed");
+    let deposit_b = vault
+        .deposit(&alice, &token, &2_000, &unlock_time, &0, &None)
+        .expect("deposit B should succeed");
+
+    vault
+        .commit_mev(&alice, &deposit_a)
+        .expect("commit for deposit A");
+    vault
+        .commit_mev(&alice, &deposit_b)
+        .expect("commit for deposit B");
+
+    assert!(vault.get_mev_commitment(&deposit_a).is_some());
+    assert!(vault.get_mev_commitment(&deposit_b).is_some());
+}
+
+// ================================================================
+//  #825 — Sustainability report: aggregated metrics
+// ================================================================
+
+/// #825 — the report sums carbon footprint and carbon offset across all
+/// deposits and counts active deposits.
+#[test]
+fn test_sustainability_report_aggregates_sums_and_count() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100;
+
+    let d1 = vault
+        .deposit(&alice, &token, &500, &unlock_time, &0, &None)
+        .expect("deposit 1");
+    let d2 = vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &None)
+        .expect("deposit 2");
+    let d3 = vault
+        .deposit(&alice, &token, &2_000, &unlock_time, &0, &None)
+        .expect("deposit 3");
+
+    let m1 = vault.get_sustainability_metrics(&alice, &d1).expect("m1");
+    let m2 = vault.get_sustainability_metrics(&alice, &d2).expect("m2");
+    let m3 = vault.get_sustainability_metrics(&alice, &d3).expect("m3");
+
+    let report = vault.generate_sustainability_report(&alice);
+
+    assert_eq!(
+        report.total_carbon_footprint,
+        m1.carbon_footprint + m2.carbon_footprint + m3.carbon_footprint,
+        "total carbon footprint must be the sum of all deposits"
+    );
+    assert_eq!(
+        report.total_carbon_offset,
+        m1.carbon_offset_grams + m2.carbon_offset_grams + m3.carbon_offset_grams,
+        "total carbon offset must be the sum of all deposits"
+    );
+    assert_eq!(report.active_deposit_count, 3);
+}
+
+/// #825 — the renewable energy percentage is a weighted average (weighted
+/// by deposit amount), not a plain mean.
+#[test]
+fn test_sustainability_report_weighted_average_renewable() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+
+    // 1_000 units at 0% and 3_000 units at 100%.
+    // Plain mean would be 50%; weighted mean is (0*1000 + 100*3000) / 4000 = 75.
+    vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &Some(0))
+        .expect("deposit 1");
+    vault
+        .deposit(&alice, &token, &3_000, &unlock_time, &0, &Some(100))
+        .expect("deposit 2");
+
+    let report = vault.generate_sustainability_report(&alice);
+    assert_eq!(
+        report.average_renewable_energy_percent, 75,
+        "renewable percent must be weighted by deposit amount"
+    );
+    assert_eq!(report.active_deposit_count, 2);
+}
+
+/// #825 — aggregation works with many deposits.
+#[test]
+fn test_sustainability_report_many_deposits() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100;
+
+    let mut expected_footprint: i128 = 0;
+    let mut expected_offset: i128 = 0;
+    let mut expected_weighted: i128 = 0;
+    let mut expected_amount: i128 = 0;
+
+    for i in 0..20u32 {
+        let amount = 100i128 * (i as i128 + 1);
+        let renewable = (i * 5) % 101;
+        let penalty = if i % 2 == 0 { 0 } else { 5_000 };
+        let id = vault
+            .deposit(&alice, &token, &amount, &unlock_time, &penalty, &Some(renewable))
+            .expect("deposit should succeed");
+        let m = vault.get_sustainability_metrics(&alice, &id).expect("metrics");
+        expected_footprint += m.carbon_footprint;
+        expected_offset += m.carbon_offset_grams;
+        expected_weighted += m.renewable_energy_percent as i128 * amount;
+        expected_amount += amount;
+    }
+
+    let report = vault.generate_sustainability_report(&alice);
+    assert_eq!(report.active_deposit_count, 20);
+    assert_eq!(report.total_carbon_footprint, expected_footprint);
+    assert_eq!(report.total_carbon_offset, expected_offset);
+    assert_eq!(
+        report.average_renewable_energy_percent,
+        (expected_weighted / expected_amount) as u32
+    );
+}
+
+// ================================================================
+//  #826 — Sustainability milestones: carbon neutral
+// ================================================================
+
+/// #826 — reaching 100% offset emits the carbon-neutral milestone exactly once.
+#[test]
+fn test_milestone_carbon_neutral_emitted_once() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100;
+    let baseline_events = env.events().all().len();
+
+    vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &10_000, &None)
+        .expect("deposit with full offset");
+
+    let after_first = env.events().all().len();
+    assert!(
+        after_first > baseline_events,
+        "carbon-neutral milestone must be emitted on achievement"
+    );
+
+    let report = vault.generate_sustainability_report(&alice);
+    assert!(
+        report.total_carbon_offset >= report.total_carbon_footprint,
+        "milestone condition total_offset >= total_footprint must hold"
+    );
+
+    // A second fully-offset deposit must not re-emit the milestone.
+    vault
+        .deposit(&alice, &token, &1_000, &unlock_time + 200, &10_000, &None)
+        .expect("second deposit with full offset");
+    let after_second = env.events().all().len();
+
+    // Only the deposit event itself is added; no extra milestone event.
+    assert_eq!(
+        after_second - after_first,
+        1,
+        "carbon-neutral milestone must not be re-emitted"
+    );
+}
+
+/// #826 — a partial offset does not trigger the carbon-neutral milestone.
+#[test]
+fn test_milestone_carbon_neutral_not_emitted_below_threshold() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 100;
+    let baseline_events = env.events().all().len();
+
+    vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &5_000, &None)
+        .expect("deposit with 50% offset");
+
+    let report = vault.generate_sustainability_report(&alice);
+    assert!(report.total_carbon_offset < report.total_carbon_footprint);
+
+    let total_events = env.events().all().len();
+    assert_eq!(
+        total_events - baseline_events,
+        1,
+        "only the deposit event should be emitted below the milestone threshold"
+    );
+}
+
+// ================================================================
+//  #827 — Sustainability milestones: high renewable
+// ================================================================
+
+/// #827 — an average renewable percentage of exactly 75% triggers the
+/// high-renewable milestone.
+#[test]
+fn test_milestone_high_renewable_at_exactly_75_percent() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let baseline_events = env.events().all().len();
+
+    vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &Some(75))
+        .expect("deposit at 75% renewable");
+
+    let report = vault.generate_sustainability_report(&alice);
+    assert_eq!(report.average_renewable_energy_percent, 75);
+
+    let total_events = env.events().all().len();
+    assert_eq!(
+        total_events - baseline_events,
+        2,
+        "deposit plus high-renewable milestone event expected at 75%"
+    );
+}
+
+/// #827 — an average renewable percentage of 74% does not trigger the
+/// high-renewable milestone.
+#[test]
+fn test_milestone_high_renewable_not_emitted_at_74_percent() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let baseline_events = env.events().all().len();
+
+    vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &Some(74))
+        .expect("deposit at 74% renewable");
+
+    let report = vault.generate_sustainability_report(&alice);
+    assert_eq!(report.average_renewable_energy_percent, 74);
+
+    let total_events = env.events().all().len();
+    assert_eq!(
+        total_events - baseline_events,
+        1,
+        "only the deposit event should be emitted at 74%"
+    );
+}
+
+/// #827 — the high-renewable milestone is emitted once and not re-emitted
+/// when further high-renewable deposits are added.
+#[test]
+fn test_milestone_high_renewable_not_re_emitted() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let unlock_time = now + 3600;
+    let baseline_events = env.events().all().len();
+
+    vault
+        .deposit(&alice, &token, &1_000, &unlock_time, &0, &Some(80))
+        .expect("first high-renewable deposit");
+    let after_first = env.events().all().len();
+    assert_eq!(
+        after_first - baseline_events,
+        2,
+        "first high-renewable deposit emits the milestone"
+    );
+
+    vault
+        .deposit(&alice, &token, &1_000, &unlock_time + 100, &0, &Some(90))
+        .expect("second high-renewable deposit");
+    let after_second = env.events().all().len();
+
+    assert_eq!(
+        after_second - after_first,
+        1,
+        "high-renewable milestone must not be re-emitted"
+    );
+}
 //  Recipient Validation Tests (Issue: Recipient Address Validation)
 // ================================================================
 

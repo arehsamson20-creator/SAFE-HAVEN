@@ -51,12 +51,6 @@ pub fn deposit_by_ledger(
         .publish(topics, (amount, unlock_ledger, deposit_id));
 }
 
-/// Emitted when a depositor reaches a sustainability milestone.
-pub fn sustainability_milestone(env: &Env, depositor: &Address, milestone: &str) {
-    let topics = (Symbol::new(env, "sustainability_milestone"), depositor.clone());
-    env.events().publish(topics, Symbol::new(env, milestone));
-}
-
 /// Emitted when a multi-token deposit is created (issue #330).
 /// `token_count` is the number of distinct tokens in the vault.
 pub fn multi_deposit(
@@ -357,9 +351,11 @@ pub fn rewards_claimed(env: &Env, staker: &Address, amount: i128) {
     let topics = (Symbol::new(env, "RewardsClaimed"), staker.clone());
     env.events()
         .publish(topics, (amount, env.ledger().timestamp()));
+}
 
 /// Emitted when a depositor achieves a sustainability milestone
 /// (carbon_neutral, high_renewable, carbon_negative, or large_offset).
+/// The milestone type is emitted as a Symbol in the event data.
 pub fn sustainability_milestone(env: &Env, depositor: &Address, milestone_type: &str) {
     let topics = (Symbol::new(env, "sustainability"), depositor.clone());
     env.events().publish(topics, Symbol::new(env, milestone_type));

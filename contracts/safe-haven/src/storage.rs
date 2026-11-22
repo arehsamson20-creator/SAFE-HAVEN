@@ -1735,17 +1735,21 @@ pub fn drain_staker_pool(env: &Env, token: &Address) -> i128 {
 /// Store a commit hash for a (depositor, deposit_id) pair.
 /// The commit is stored with a TTL window of MEV_COMMIT_WINDOW_SECS (30 minutes)
 /// to allow time for the reveal phase.
+///
+/// Each deposit may have at most one active commit. Callers must check
+/// `has_mev_commit` (or `get_mev_commit`) before writing and reject a second
+/// commit while the first is still pending reveal.
 pub fn set_mev_commit(env: &Env, depositor: &Address, deposit_id: u32, commit: &Bytes) {
     use crate::types::MEV_COMMIT_WINDOW_SECS;
-    
+
     let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
     env.storage().persistent().set(&key, commit);
-    
+
     // TTL for commit: 30 minutes (MEV reveal window)
     // Convert seconds to ledgers (5 seconds per ledger)
     let commit_ttl_ledgers = ((MEV_COMMIT_WINDOW_SECS + LEDGER_SECONDS - 1) / LEDGER_SECONDS) as u32;
     let commit_ttl_threshold = commit_ttl_ledgers / 2;
-    
+
     env.storage()
         .persistent()
         .extend_ttl(&key, commit_ttl_threshold, commit_ttl_ledgers);
@@ -1758,9 +1762,20 @@ pub fn get_mev_commit(env: &Env, depositor: &Address, deposit_id: u32) -> Option
     env.storage().persistent().get(&key)
 }
 
+/// Returns `true` if an active (unrevealed) commit exists for the
+/// (depositor, deposit_id) pair. Used to enforce the one-active-commit-per-deposit
+/// constraint: a second commit before reveal must be rejected.
+pub fn has_mev_commit(env: &Env, depositor: &Address, deposit_id: u32) -> bool {
+    let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
+    env.storage().persistent().has(&key)
+}
+
 /// Delete a commit hash after successful reveal.
-/// Prevents replay attacks and cleans up storage.
+/// Prevents replay attacks and cleans up storage. Once removed, the deposit
+/// is free to accept a new commit.
 pub fn remove_mev_commit(env: &Env, depositor: &Address, deposit_id: u32) {
     let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
-    env.storage().persistent().remove(&key);
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().remove(&key);
+    }
 }
