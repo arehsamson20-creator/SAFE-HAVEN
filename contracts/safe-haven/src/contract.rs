@@ -669,7 +669,7 @@ impl SafeHaven {
 
         // Track sustainability metrics
         let lock_duration: u64 = unlock_time.saturating_sub(now);
-        let carbon_footprint = calculate_carbon_footprint(amount, lock_duration);
+        let carbon_footprint = calculate_carbon_footprint(amount, lock_duration)?;
         let carbon_offset = calculate_carbon_offset(carbon_footprint, penalty_bps);
         
         let metrics = SustainabilityMetrics {
@@ -4028,11 +4028,12 @@ fn detect_mev_attack(
     Ok(())
 }
 
-/// Calculate carbon footprint: amount × duration_seconds × CARBON_BASELINE
-fn calculate_carbon_footprint(amount: i128, duration_secs: u64) -> i128 {
-    (amount as i128)
-        .saturating_mul(duration_secs as i128)
-        .saturating_mul(constants::CARBON_BASELINE_PER_UNIT_SECOND)
+/// Calculate carbon footprint: amount × duration_seconds × CARBON_BASELINE.
+fn calculate_carbon_footprint(amount: i128, duration_secs: u64) -> Result<i128, VaultError> {
+    amount
+        .checked_mul(duration_secs as i128)
+        .and_then(|value| value.checked_mul(constants::CARBON_BASELINE_PER_UNIT_SECOND))
+        .ok_or(VaultError::CarbonFootprintOverflow)
 }
 
 /// Calculate carbon offset: carbon_footprint × (penalty_bps / 10_000)

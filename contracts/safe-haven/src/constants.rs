@@ -47,4 +47,5 @@ pub const MEV_PRICE_DEVIATION_THRESHOLD_BPS: u32 = 200;
 pub const RENEWABLE_ENERGY_BASELINE: u32 = 50;
 
 /// Carbon baseline: grams CO2e per token base unit per second (currently 1).
+/// The maximum supported deposit and lock produce 157,788,000,000,000,000,000,000 grams.
 pub const CARBON_BASELINE_PER_UNIT_SECOND: i128 = 1;
