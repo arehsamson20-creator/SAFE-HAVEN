@@ -29,20 +29,34 @@ pub enum VaultError {
     RecipientNotWhitelisted = 18,
     /// Compound frequency must be >= 60 seconds if non-zero (issue #332).
     InvalidCompoundFrequency = 19,
+    /// MEV attack detected: price deviation > 200 bps from TWAP
+    MevDetected = 20,
+    /// Price sampling too frequent: must wait >= 1 hour between samples
+    SamplingTooFrequent = 21,
+    /// Session key not found
+    SessionKeyNotFound = 22,
+    /// Session key has been revoked
+    SessionKeyRevoked = 23,
+    /// Session key has expired
+    SessionKeyExpired = 24,
+    /// Session key exceeds maximum deposit amount
+    SessionKeyInsufficientLimit = 25,
+    /// Emergency withdrawal would exceed the per-ledger hard cap.
+    EmergencyWithdrawalLimitExceeded = 26,
     /// Sponsorship fund not initialized
-    SponsorshipNotInitialized = 20,
+    SponsorshipNotInitialized = 27,
     /// User not eligible for sponsorship
-    NotEligibleForSponsorship = 21,
+    NotEligibleForSponsorship = 28,
     /// Sponsorship fund insufficient
-    InsufficientSponsorshipFund = 22,
+    InsufficientSponsorshipFund = 29,
     /// User exceeded daily sponsorship limit
-    SponsorshipDailyLimitExceeded = 23,
+    SponsorshipDailyLimitExceeded = 30,
     /// User transaction cooldown still active
-    SponsorshipCooldownActive = 24,
+    SponsorshipCooldownActive = 31,
     /// Potential sybil attack detected
-    PotentialSybilAttack = 25,
+    PotentialSybilAttack = 32,
     /// Sponsorship configuration error
-    InvalidSponsorshipConfig = 26,
+    InvalidSponsorshipConfig = 33,
     /// Batch size exceeds MAX_BATCH_SIZE
     BatchSizeExceeded = 27,
     /// Carbon footprint multiplication exceeded the supported integer range.

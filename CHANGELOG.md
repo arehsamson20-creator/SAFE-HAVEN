@@ -190,6 +190,7 @@ Include contract redeployment steps, storage migration commands, and frontend up
 
 ### Fixed
 
+- Duplicate staker reward claims are rejected, and the rewards pool is reduced by each successful claim
 - `accept_admin` correctly rejects calls after `cancel_transfer_admin` clears the pending admin (#28, #63)
 - `time_remaining` returns `0` for nonexistent deposits instead of panicking
 - Depositor pagination overflow when `offset + limit` exceeds the depositor list length (#140)
