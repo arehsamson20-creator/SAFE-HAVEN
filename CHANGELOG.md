@@ -134,6 +134,7 @@ Include contract redeployment steps, storage migration commands, and frontend up
 
 ### Added
 
+- MEV protection user guide covering commit-reveal workflow, commitment hash encoding, reveal window, detection threshold, and recovery claim behavior (#807)
 - Cumulative staker reward claim tracking and a replenishment-generation guard so duplicate claims fail until new rewards enter the pool
 - `deposit_by_ledger(depositor, token, amount, unlock_ledger, penalty_bps)` — locks tokens until a specific Stellar ledger sequence number is reached instead of a wall-clock timestamp; shares the per-depositor deposit-ID counter with timestamp-based deposits (#88)
 - `withdraw_to(depositor, deposit_id, recipient)` — withdraws unlocked tokens to an arbitrary recipient address rather than the depositor; supports both timestamp-based and ledger-based deposits
