@@ -1,11 +1,10 @@
 use soroban_sdk::{token, Address, Bytes, Env, Vec};
 
-use crate::types::{VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
-use soroban_sdk::{Env, Bytes};
-use crate::types::{DepositSubscription, MultiTokenVaultEntry, SubscriptionExecution, SubscriptionStats, TaxLossHarvest, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS, SustainabilityMetrics};
-use crate::types::{MultiTokenVaultEntry, VaultEntry, VaultKey, LedgerVaultEntry, SessionKeyEntry, MAX_LOCK_DURATION_SECS};
-use crate::types::{DepositSubscription, MultiTokenVaultEntry, SubscriptionExecution, SubscriptionStats, TaxLossHarvest, VaultEntry, VaultKey, LedgerVaultEntry, MAX_LOCK_DURATION_SECS};
-use crate::types::CircuitBreakerActivation;
+use crate::types::{
+    CircuitBreakerActivation, DepositSubscription, LedgerVaultEntry, MultiTokenVaultEntry,
+    SessionKeyEntry, SubscriptionExecution, SubscriptionStats, SustainabilityMetrics,
+    TaxLossHarvest, VaultEntry, VaultKey, MAX_LOCK_DURATION_SECS,
+};
 
 // ================================================================
 // LEDGER_SECONDS: Average time between Stellar ledger closes
@@ -441,6 +440,9 @@ pub fn remove_pending_admin(env: &Env) {
 //  Initialized flag
 // ----------------------------------------------------------------
 
+/// Mark the contract as initialized. Must be called in the same invocation
+/// as the rest of the initial state (admin, fee_recipient, etc.) so that
+/// the whole setup is atomic — if any step traps, nothing is persisted.
 pub fn set_initialized(env: &Env) {
     env.storage()
         .persistent()
@@ -450,11 +452,23 @@ pub fn set_initialized(env: &Env) {
         .extend_ttl(&VaultKey::Initialized, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
+/// Returns `true` once `initialize()` has completed successfully.
 pub fn is_initialized(env: &Env) -> bool {
     env.storage()
         .persistent()
         .get::<VaultKey, bool>(&VaultKey::Initialized)
         .unwrap_or(false)
+}
+
+/// Guard used at the top of `initialize()`. Returns
+/// `Err(VaultError::AlreadyInitialized)` if the flag is already set, so a
+/// second call cannot replace the admin or fee recipient.
+pub fn require_not_initialized(env: &Env) -> Result<(), crate::errors::VaultError> {
+    if is_initialized(env) {
+        Err(crate::errors::VaultError::AlreadyInitialized)
+    } else {
+        Ok(())
+    }
 }
 
 // ----------------------------------------------------------------
@@ -920,23 +934,14 @@ pub fn get_staker(env: &Env, staker: &Address) -> Option<i128> {
     env.storage().persistent().get(&key)
 }
 
-/// Record the timestamp when a staker first registers.
-pub fn set_staker_registration_timestamp(env: &Env, staker: &Address, timestamp: u64) {
-    let key = VaultKey::StakerRegistrationTimestamp(staker.clone());
-    env.storage().persistent().set(&key, &timestamp);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+/// Remove a staker's active stake entry. The historical staker list is append-only.
+pub fn remove_staker(env: &Env, staker: &Address) {
+    let key = VaultKey::Staker(staker.clone());
+    env.storage().persistent().remove(&key);
 }
 
-/// Get the timestamp when a staker first registered, if recorded.
-pub fn get_staker_registration_timestamp(env: &Env, staker: &Address) -> Option<u64> {
-    let key = VaultKey::StakerRegistrationTimestamp(staker.clone());
-    env.storage().persistent().get(&key)
-}
-
-/// Get the legacy staker list written before the list was indexed.
-fn get_legacy_staker_list(env: &Env) -> Vec<Address> {
+/// Get staker list (append-only, may contain stale entries after removes).
+fn get_staker_list(env: &Env) -> Vec<Address> {
     let key = VaultKey::StakerList;
     env.storage()
         .persistent()
@@ -1468,6 +1473,37 @@ pub fn record_faucet_request(env: &Env, account: &Address, asset: &FaucetAsset, 
 //  Sustainability metrics helpers
 // ----------------------------------------------------------------
 
+/// Baseline carbon intensity: grams of CO2e emitted per unit of deposit
+/// amount per second of lock duration.
+///
+/// The carbon footprint of a deposit is computed as:
+/// `carbon_footprint = amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND`
+///
+/// The default baseline is 1 gram CO2e per unit per second. For example,
+/// 1000 units locked for 86,400 seconds (1 day) yields 86,400,000 grams CO2e.
+///
+/// This is a compile-time constant and is intentionally not configurable
+/// (no per-token baselines, no dynamic adjustment).
+pub const CARBON_BASELINE_PER_UNIT_SECOND: i128 = 1;
+
+/// Compute the carbon footprint for a deposit using checked arithmetic.
+///
+/// Returns `Err(VaultError::Overflow)` instead of panicking if the
+/// intermediate or final product exceeds the `i128` range. With the
+/// maximum deposit amount (10^15) and the maximum lock duration
+/// (5 years ≈ 157,680,000 seconds) the product is ≈ 1.58 × 10^23, which
+/// fits comfortably within `i128` (max ≈ 1.7 × 10^38).
+pub fn compute_carbon_footprint(
+    amount: i128,
+    duration_seconds: u64,
+) -> Result<i128, crate::errors::VaultError> {
+    let duration = i128::from(duration_seconds);
+    amount
+        .checked_mul(duration)
+        .and_then(|v| v.checked_mul(CARBON_BASELINE_PER_UNIT_SECOND))
+        .ok_or(crate::errors::VaultError::Overflow)
+}
+
 /// Store sustainability metrics for a specific deposit.
 pub fn set_sustainability_metrics(
     env: &Env,
@@ -1550,6 +1586,12 @@ pub fn set_total_carbon_offset(env: &Env, depositor: &Address, total: i128) {
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
 }
 
+/// Number of sustainability milestone bits tracked in the bitmap.
+pub const MILESTONE_BITMAP_BITS: u32 = 4;
+
+/// Mask covering all valid milestone bits (4 bits → 0b1111).
+pub const MILESTONE_BITMAP_MASK: u32 = (1u32 << MILESTONE_BITMAP_BITS) - 1;
+
 /// Check if a depositor has achieved a specific milestone.
 /// Returns a bitmap where each bit represents a different milestone type.
 pub fn get_milestone_bitmap(env: &Env, depositor: &Address) -> u32 {
@@ -1561,12 +1603,45 @@ pub fn get_milestone_bitmap(env: &Env, depositor: &Address) -> u32 {
 }
 
 /// Set milestone bitmap for a depositor.
+///
+/// The bitmap is immutable once a bit is set: this helper only ever ORs the
+/// incoming bits into the stored value, so previously achieved milestones can
+/// never be cleared. Only bits within `MILESTONE_BITMAP_MASK` are persisted.
 pub fn set_milestone_bitmap(env: &Env, depositor: &Address, bitmap: u32) {
     let key = VaultKey::MilestoneAchieved(depositor.clone());
-    env.storage().persistent().set(&key, &bitmap);
+    let current: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+    let merged = (current | bitmap) & MILESTONE_BITMAP_MASK;
+    env.storage().persistent().set(&key, &merged);
     env.storage()
         .persistent()
         .extend_ttl(&key, BUMP_THRESHOLD, BUMP_TARGET);
+}
+
+/// Returns `true` if the milestone identified by `bit` (0-based) has already
+/// been achieved by `depositor`. Out-of-range bits are treated as unset.
+pub fn is_milestone_set(env: &Env, depositor: &Address, bit: u32) -> bool {
+    if bit >= MILESTONE_BITMAP_BITS {
+        return false;
+    }
+    let bitmap = get_milestone_bitmap(env, depositor);
+    (bitmap & (1u32 << bit)) != 0
+}
+
+/// Mark the milestone identified by `bit` (0-based) as achieved for
+/// `depositor`. Returns `true` if this call newly set the bit (i.e. the
+/// milestone was not previously achieved), `false` if it was already set or
+/// `bit` is out of range. Bits are only ever set, never cleared.
+pub fn set_milestone(env: &Env, depositor: &Address, bit: u32) -> bool {
+    if bit >= MILESTONE_BITMAP_BITS {
+        return false;
+    }
+    let flag = 1u32 << bit;
+    let current = get_milestone_bitmap(env, depositor);
+    if (current & flag) != 0 {
+        return false;
+    }
+    set_milestone_bitmap(env, depositor, flag);
+    true
 }
 
 
@@ -1585,6 +1660,8 @@ pub fn get_session_key(env: &Env, delegator: &Address, key_id: u32) -> Option<Se
 pub fn set_session_key(env: &Env, delegator: &Address, key_id: u32, entry: &SessionKeyEntry) {
     let key = VaultKey::SessionKey(delegator.clone(), key_id);
     env.storage().persistent().set(&key, entry);
+}
+
 // ================================================================
 //  NFT Evolution helpers
 // ================================================================
@@ -1732,6 +1809,13 @@ pub fn drain_staker_pool(env: &Env, token: &Address) -> i128 {
 //  MEV Protection: Commit-Reveal Scheme
 // ----------------------------------------------------------------
 
+/// Number of ledgers that cover the MEV commit reveal window
+/// (`MEV_COMMIT_WINDOW_SECS`, 30 minutes), rounded up.
+pub const MEV_COMMIT_TTL_LEDGERS: u32 =
+    ((crate::types::MEV_COMMIT_WINDOW_SECS + LEDGER_SECONDS - 1) / LEDGER_SECONDS) as u32;
+/// Refresh threshold for the commit TTL — bump when half the window remains.
+pub const MEV_COMMIT_TTL_THRESHOLD: u32 = MEV_COMMIT_TTL_LEDGERS / 2;
+
 /// Store a commit hash for a (depositor, deposit_id) pair.
 /// The commit is stored with a TTL window of MEV_COMMIT_WINDOW_SECS (30 minutes)
 /// to allow time for the reveal phase.
@@ -1742,7 +1826,26 @@ pub fn drain_staker_pool(env: &Env, token: &Address) -> i128 {
 pub fn set_mev_commit(env: &Env, depositor: &Address, deposit_id: u32, commit: &Bytes) {
     use crate::types::MEV_COMMIT_WINDOW_SECS;
 
+///
+/// The commit is keyed by `VaultKey::MevCommit(depositor, deposit_id)` in
+/// persistent storage and its TTL is extended to cover the full
+/// `MEV_COMMIT_WINDOW_SECS` (30 minute) reveal window.
+///
+/// A commit cannot be overwritten: if one already exists for this pair the
+/// call returns `Err(VaultError::CommitAlreadyExists)` and leaves the stored
+/// value untouched.
+pub fn set_mev_commit(
+    env: &Env,
+    depositor: &Address,
+    deposit_id: u32,
+    commit: &Bytes,
+) -> Result<(), crate::errors::VaultError> {
     let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
+
+    if env.storage().persistent().has(&key) {
+        return Err(crate::errors::VaultError::CommitAlreadyExists);
+    }
+
     env.storage().persistent().set(&key, commit);
 
     // TTL for commit: 30 minutes (MEV reveal window)
@@ -1753,13 +1856,30 @@ pub fn set_mev_commit(env: &Env, depositor: &Address, deposit_id: u32, commit: &
     env.storage()
         .persistent()
         .extend_ttl(&key, commit_ttl_threshold, commit_ttl_ledgers);
+    env.storage().persistent().extend_ttl(
+        &key,
+        MEV_COMMIT_TTL_THRESHOLD,
+        MEV_COMMIT_TTL_LEDGERS,
+    );
+
+    Ok(())
 }
 
 /// Retrieve a stored commit hash for a (depositor, deposit_id) pair.
-/// Returns None if no commit exists for this pair.
+/// Returns `None` if no commit exists for this pair (e.g. already revealed
+/// or the reveal window has expired).
 pub fn get_mev_commit(env: &Env, depositor: &Address, deposit_id: u32) -> Option<Bytes> {
     let key = VaultKey::MevCommit(depositor.clone(), deposit_id);
-    env.storage().persistent().get(&key)
+    let commit: Option<Bytes> = env.storage().persistent().get(&key);
+    if commit.is_some() {
+        // Keep the commit alive for the remainder of the reveal window.
+        env.storage().persistent().extend_ttl(
+            &key,
+            MEV_COMMIT_TTL_THRESHOLD,
+            MEV_COMMIT_TTL_LEDGERS,
+        );
+    }
+    commit
 }
 
 /// Returns `true` if an active (unrevealed) commit exists for the

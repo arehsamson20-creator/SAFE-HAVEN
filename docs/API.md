@@ -62,6 +62,12 @@ soroban contract invoke \
 
 Returns a `u32` deposit ID.
 
+The deposit also stores sustainability metrics using
+`carbon_footprint = amount × lock_duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND`.
+The baseline is 1 gram CO2e per token base unit per second. If either checked
+multiplication exceeds the `i128` range, the call fails with
+`CarbonFootprintOverflow`.
+
 ### deposit_for(payer, depositor, token, amount, unlock_time, penalty_bps)
 
 A third party pays for the deposit while the beneficiary is a different address.
@@ -152,6 +158,19 @@ soroban contract invoke \
   --deposit_id 0
 ```
 
+## Staker registry
+
+### register_staker(staker, amount)
+
+Register a positive stake amount or update the staker's existing amount. The staker must authorize the call. `total_staked` tracks the sum of all active registered stakes.
+
+### withdraw_stake(staker, amount)
+
+Reduce or remove the staker's registered amount. The staker must authorize the call, and `amount` must be positive and no greater than the current stake. A full withdrawal removes the active registry entry. This accounting-only operation does not transfer tokens.
+
+### claim_staker_rewards(staker)
+
+Claim the staker's proportional share of the rewards pool, calculated from their current registered stake and `total_staked`. The staker must authorize the call.
 ## Staker rewards
 
 ### register_staker(staker, amount)
