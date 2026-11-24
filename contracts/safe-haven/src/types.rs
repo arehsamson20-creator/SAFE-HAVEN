@@ -607,6 +607,20 @@ pub struct MEVCommitment {
     pub reveal_deadline: u64,
 }
 
+/// MEV status for a deposit tracking the protection lifecycle.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MEVStatus {
+    /// No MEV protection has been initiated.
+    Unprotected,
+    /// Commit has been submitted, awaiting reveal.
+    Committed,
+    /// Commit has been revealed and verified.
+    Revealed,
+    /// Sandwich attack detected after reveal.
+    AttackDetected,
+}
+
 /// MEV detection record when sandwich attack is identified.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -621,20 +635,6 @@ pub struct MEVDetection {
     pub recovery_amount: i128,
     /// Timestamp when detection occurred.
     pub detection_time: u64,
-}
-
-/// MEV status for a deposit tracking the protection lifecycle.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum MEVStatus {
-    /// No MEV protection has been initiated.
-    Unprotected,
-    /// Commit has been submitted, awaiting reveal.
-    Committed,
-    /// Commit has been revealed and verified.
-    Revealed,
-    /// Sandwich attack detected after reveal.
-    AttackDetected,
 }
 
 /// Price sample for TWAP calculation to detect price manipulation.
