@@ -62,6 +62,12 @@ soroban contract invoke \
 
 Returns a `u32` deposit ID.
 
+The deposit also stores sustainability metrics using
+`carbon_footprint = amount × lock_duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND`.
+The baseline is 1 gram CO2e per token base unit per second. If either checked
+multiplication exceeds the `i128` range, the call fails with
+`CarbonFootprintOverflow`.
+
 ### deposit_for(payer, depositor, token, amount, unlock_time, penalty_bps)
 
 A third party pays for the deposit while the beneficiary is a different address.

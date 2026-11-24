@@ -69,6 +69,9 @@ pub enum VaultError {
     ArithmeticOverflow = 31,
     InvalidSponsorshipConfig = 33,
     /// Batch size exceeds MAX_BATCH_SIZE
+    BatchSizeExceeded = 27,
+    /// Carbon footprint multiplication exceeded the supported integer range.
+    CarbonFootprintOverflow = 28,
     BatchSizeExceeded = 34,
     /// Renewable energy percentage must be 0-100
     InvalidRenewableEnergyPercent = 35,

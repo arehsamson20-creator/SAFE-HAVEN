@@ -83,6 +83,8 @@ pub const MEV_PRICE_DEVIATION_THRESHOLD_BPS: u32 = 200;
 /// Baseline renewable energy percentage for deposits (default 50%)
 pub const RENEWABLE_ENERGY_BASELINE: u32 = 50;
 
+/// Carbon baseline: grams CO2e per token base unit per second (currently 1).
+/// The maximum supported deposit and lock produce 157,788,000,000,000,000,000,000 grams.
 /// Carbon baseline: grams CO2e per unit per second (1 gram per unit-second).
 ///
 /// This is the baseline coefficient used by the deposit carbon footprint
