@@ -56,6 +56,17 @@ pub enum VaultError {
     /// Potential sybil attack detected
     PotentialSybilAttack = 32,
     /// Sponsorship configuration error
+    InvalidSponsorshipConfig = 26,
+    /// Stake amount must be positive.
+    InvalidStakeAmount = 27,
+    /// Staker is not registered.
+    StakerNotFound = 28,
+    /// No staker rewards are available to claim.
+    NoRewardsToClaim = 29,
+    /// Withdrawal exceeds the staker's registered stake.
+    InsufficientStakeAmount = 30,
+    /// Stake or reward accounting arithmetic overflowed.
+    ArithmeticOverflow = 31,
     InvalidSponsorshipConfig = 33,
     /// Batch size exceeds MAX_BATCH_SIZE
     BatchSizeExceeded = 34,
