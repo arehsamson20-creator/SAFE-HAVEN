@@ -461,6 +461,43 @@ pub fn claim_winnings(
 // ================================================================
 
 /// Cancel a market and refund all bets
+
+/// Claim a refund for a bet placed on a cancelled market (Issue #93).
+pub fn claim_refund(
+    env: &Env,
+    bettor: Address,
+    market_id: u32,
+    outcome_id: u32,
+    token: Address,
+) -> Result<i128, PredictionMarketError> {
+    bettor.require_auth();
+
+    let market = storage::get_market(env, market_id)
+        .ok_or(PredictionMarketError::MarketNotFound)?;
+
+    if market.status != MarketStatus::Cancelled {
+        return Err(PredictionMarketError::InvalidMarketStatus);
+    }
+
+    let mut bet = storage::get_bet(env, market_id, outcome_id, &bettor)
+        .ok_or(PredictionMarketError::BetNotFound)?;
+
+    // Double claim prevention (Issue #91)
+    if bet.claimed {
+        return Err(PredictionMarketError::BetsAlreadyClaimed);
+    }
+
+    let refund_amount = bet.amount;
+    bet.claimed = true;
+    storage::set_bet(env, market_id, outcome_id, &bettor, &bet);
+
+    let token_client = token::Client::new(env, &token);
+    token_client.transfer(&env.current_contract_address(), &bettor, &refund_amount);
+
+    events::winnings_claimed(env, market_id, &bettor, refund_amount, 0);
+    Ok(refund_amount)
+}
+
 pub fn cancel_market(
     env: &Env,
     admin: Address,
