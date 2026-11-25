@@ -62,9 +62,40 @@ This document summarizes the comprehensive documentation created for ledger-base
   - ADR-001: Dual Deposit Types
   - Other related guides
 
+## Ledger vs Timestamp Deposit Asymmetry
+
+Ledger-based deposits and timestamp-based deposits intentionally enforce **different** upper bounds:
+
+| Constraint | Timestamp Deposits | Ledger Deposits |
+|------------|--------------------|-----------------|
+| Maximum lock | 5 years (enforced) | **No maximum** (intentional) |
+| Minimum lock | Enforced minimum | 12-ledger minimum gap |
+| Unit of measure | Unix timestamp (seconds) | Ledger sequence number (u32) |
+| Far-future values | Rejected beyond 5 years | Accepted for any valid u32 |
+
+### No Maximum Ledger Limit
+
+There is **no upper-bound check** on the ledger number for ledger-based deposits. A deposit can be locked to an arbitrarily far-future ledger, up to the full `u32` range (e.g., `2^32 - 1 = 4,294,967,295`). This is intentional for flexibility: protocols may coordinate releases against ledger milestones that are far in the future, and ledger numbers are not tied to wall-clock time in the same way timestamps are.
+
+### Minimum Ledger Gap (12 Ledgers)
+
+While there is no maximum, ledger deposits **do** enforce a minimum gap: the target unlock ledger must be at least **12 ledgers** beyond the current ledger. This guards against deposits that would unlock immediately (or nearly immediately) and ensures the lock has meaningful duration in ledger terms.
+
+### No Overflow Concerns
+
+Ledger numbers are `u32` values and are handled as `i128` internally where arithmetic is performed. For any valid `u32` ledger number (up to `2^32 - 1`), there is no overflow. The absence of a maximum check does not introduce overflow risk because the accepted input domain is bounded by `u32`.
+
+### Verification
+
+- No maximum ledger number check exists in the deposit path.
+- Very large ledger numbers (e.g., `2^32 - 1`) are accepted.
+- Deposits succeed for far-future ledgers.
+- No overflow occurs for valid `u32` values.
+
 ## Coverage of Acceptance Criteria
 
 ### ✓ Use cases explained clearly
+=======
 
 **Evidence:**
 - "When to Use Ledger Deposits" section with 4 detailed scenarios:

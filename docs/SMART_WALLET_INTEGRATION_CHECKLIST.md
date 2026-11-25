@@ -4,7 +4,7 @@
 
 This checklist ensures your smart wallet integrates correctly and securely with SAFE-HAVEN vault contracts. Use it as a step-by-step guide during implementation and as a pre-deployment verification tool.
 
-**Document Version**: 1.0  
+**Document Version**: 1.1  
 **Last Updated**: 2024  
 **Target Audience**: Wallet developers, DevOps teams, security auditors
 
@@ -61,6 +61,41 @@ This checklist ensures your smart wallet integrates correctly and securely with 
   - Use wallet contract address, NOT individual signer addresses
   - Use wallet contract address, NOT relayer addresses
   - Verified in production configuration files
+
+### Contract Address as Depositor Verification
+
+Smart wallets use their **contract address** as the `depositor` for all vault operations. The vault relies on Soroban's native `require_auth()` to verify the smart wallet's authorization. Verify the following:
+
+- [ ] **Contract addresses are accepted as `depositor`**
+  - Vault accepts a Soroban contract address (not just an EOA account) as the `depositor` parameter
+  - No validation rejects contract addresses (e.g., no EOA-only checks)
+  - Deposit is recorded under the contract address exactly as passed
+
+- [ ] **`require_auth()` works with contract addresses**
+  - `require_auth()` on the contract address succeeds when the smart wallet authorizes the call
+  - `require_auth()` on the contract address fails when the smart wallet does NOT authorize the call
+  - Authorization is enforced by Soroban's native framework (no custom auth logic in the vault)
+
+- [ ] **Deposit from smart wallet succeeds**
+  - Smart wallet calls `vault.deposit(wallet_contract_address, token, amount, unlock_time, penalty_bps)`
+  - Deposit succeeds and is recorded under the wallet contract address
+  - Token transfer from the smart wallet contract to the vault completes correctly
+
+- [ ] **Withdrawal by smart wallet succeeds**
+  - Smart wallet calls `vault.withdraw(wallet_contract_address, deposit_id)`
+  - Withdrawal succeeds and tokens are returned to the smart wallet contract
+  - Deposit state is updated correctly (removed/marked withdrawn)
+
+- [ ] **No special handling is required for contracts**
+  - Vault does NOT contain contract-specific code paths (no `if is_contract(...)` branches)
+  - Contract addresses and EOA addresses follow the same code path
+  - No registration, allowlisting, or whitelisting of contract addresses is needed
+  - No additional configuration or flags are required to support smart wallets
+
+- [ ] **Contract address cannot be impersonated**
+  - An EOA cannot authorize on behalf of a contract address
+  - Only the smart wallet contract itself can authorize operations for its address
+  - Attempts by other addresses to act as the contract address fail authorization
 
 ### Authorization Configuration
 
@@ -541,6 +576,54 @@ Use this for time-bounded delegated funding (gasless or relayed deposits).
 
 ---
 
+## Smart Wallet Security Model
+
+This section documents the security model that governs how SAFE-HAVEN vaults interact with smart wallets. Understanding this model is essential for integrators and auditors.
+
+### Trust Boundaries
+
+- **Vault trusts Soroban `require_auth()`**: The vault does not implement its own authorization scheme. It relies entirely on Soroban's native `require_auth()` to verify that the address passed as `depositor` (or `payer`) has authorized the call.
+
+- **Contract addresses are first-class principals**: Soroban treats contract addresses and account addresses uniformly for authorization purposes. A contract address can authorize a call exactly as an account can, provided the contract itself invokes the authorization.
+
+- **Vault does not inspect wallet internals**: The vault has no knowledge of a smart wallet's signer set, threshold, session keys, or recovery mechanism. It only observes whether the contract address authorized the call.
+
+### Authorization Guarantees
+
+- **Only the contract can authorize for its own address**: An EOA cannot authorize on behalf of a contract address. Soroban's authorization framework binds authorization to the actual caller. This prevents impersonation of smart wallets.
+
+- **Authorization is checked before state mutation**: All state-mutating functions call `require_auth()` on the relevant address before any state changes. Failed authorization reverts the entire operation with no partial state updates.
+
+- **No special handling for contracts**: The vault contains no contract-specific code paths. Contract addresses and EOA addresses follow identical logic. This eliminates a class of bugs where contract handling diverges from account handling.
+
+### Ownership Model
+
+- **Depositor is the owner**: The `depositor` parameter recorded at deposit time is the sole owner of the deposit. For smart wallets, this is the wallet's contract address.
+
+- **Signers are not owners**: Individual signers of a multisig or AA wallet have no direct claim on deposits. They can only act through the wallet contract, which must authorize the call.
+
+- **Relayers are not owners**: In `deposit_for()` flows, the payer funds the deposit but the `depositor` owns it. In session key flows, the session key funds the deposit but the wallet owns it.
+
+### Threat Model
+
+- **Compromised signer**: A single compromised signer cannot move funds if the wallet's threshold is not met. The vault defers to the wallet's authorization decision.
+
+- **Compromised session key**: A compromised session key can only create deposits (funded by the session key's own balance) up to its expiry. It cannot withdraw wallet-owned deposits or spend wallet funds. Revoke the key to stop further use.
+
+- **Malicious relayer**: A relayer in `deposit_for()` or entry-point flows cannot withdraw deposits it funded. Ownership is bound to the `depositor` address, not the payer.
+
+- **Impersonation attempt**: An attacker cannot authorize as a contract address they do not control. Soroban's authorization framework rejects such attempts.
+
+### Integration Responsibilities
+
+- **Wallet is responsible for its own authorization logic**: The vault does not validate the wallet's internal approval mechanism. The wallet must correctly implement threshold checks, signature verification, replay protection, and any other controls before authorizing a vault call.
+
+- **Wallet must authorize before calling the vault**: The wallet should complete its internal approval flow and then invoke the vault call within the same authorization context, so Soroban sees the contract address as the authorizing principal.
+
+- **Integrators must test both success and failure paths**: Verify that authorized calls succeed and unauthorized calls fail, for both deposits and withdrawals.
+
+---
+
 ## Security Audit Checklist
 
 ### Authorization & Access Control
@@ -567,6 +650,38 @@ Use this for time-bounded delegated funding (gasless or relayed deposits).
   - No alternate code paths skip auth
   - No admin override of authorization
   - No emergency mode that disables auth
+
+### Contract Address Depositor Verification
+
+- [ ] **Contract addresses accepted as `depositor`**
+  - Vault accepts contract addresses without rejection
+  - No EOA-only validation blocks contract addresses
+  - Deposit recorded under the exact contract address passed
+
+- [ ] **`require_auth()` accepts contract addresses**
+  - Authorized contract address passes `require_auth()`
+  - Unauthorized contract address fails `require_auth()`
+  - Authorization uses Soroban native framework only
+
+- [ ] **Deposit from smart wallet succeeds**
+  - Smart wallet contract calls `deposit()` and succeeds
+  - Tokens transferred from contract to vault
+  - Deposit recorded under contract address
+
+- [ ] **Withdrawal by smart wallet succeeds**
+  - Smart wallet contract calls `withdraw()` and succeeds
+  - Tokens returned to contract address
+  - Deposit state updated correctly
+
+- [ ] **No special handling required for contracts**
+  - No contract-specific branches in vault code
+  - No allowlist/registration of contract addresses
+  - Contract and EOA addresses follow identical code paths
+
+- [ ] **Contract address cannot be impersonated**
+  - EOA cannot authorize on behalf of a contract address
+  - Only the contract itself can authorize its operations
+  - Impersonation attempts fail authorization
 
 ### Session Key Security
 
@@ -630,6 +745,7 @@ Use this for time-bounded delegated funding (gasless or relayed deposits).
 - [ ] **Depositor address is validated**
   - Depositor is not zero address
   - Depositor address format is valid
+  - Contract addresses are accepted (not rejected as invalid)
 
 ### State Management
 
@@ -703,6 +819,14 @@ Use this for time-bounded delegated funding (gasless or relayed deposits).
   - Test wallet authorizes operations
   - Test non-wallet cannot authorize operations
   - Test authorization failure reverts state
+  
+- [ ] **Contract address depositor tests exist**
+  - Test contract address accepted as `depositor`
+  - Test `require_auth()` succeeds for authorized contract address
+  - Test `require_auth()` fails for unauthorized contract address
+  - Test deposit from smart wallet succeeds
+  - Test withdrawal by smart wallet succeeds
+  - Test no special handling required (same code path as EOA)
   
 - [ ] **Session key tests exist**
   - Test key authorization and usage
@@ -800,6 +924,7 @@ Use this for time-bounded delegated funding (gasless or relayed deposits).
   
 - [ ] **Security guide written**
   - Authorization model explained
+  - Smart wallet security model documented
   - Session key best practices documented
   - Revocation procedures explained
   
@@ -861,243 +986,3 @@ Use this for time-bounded delegated funding (gasless or relayed deposits).
   - Primary contact: ___________________
   - Backup contact: ____________________
   - Escalation chain documented
-
-### Ongoing Monitoring
-
-- [ ] **Daily monitoring (first week)**
-  - Review logs for errors
-  - Confirm expected transaction patterns
-  - Check for anomalies
-  
-- [ ] **Weekly monitoring (first month)**
-  - Review key rotation schedule
-  - Check for unused session keys (revoke if needed)
-  - Review user feedback
-  
-- [ ] **Monthly monitoring**
-  - Aggregate statistics (deposits, withdrawals, etc.)
-  - Review security logs for unauthorized attempts
-  - Check for deprecation notices or upstream changes
-  
-- [ ] **Quarterly review**
-  - Full security audit of logs
-  - Update incident response plan
-  - Plan for upgrades or improvements
-
-### Maintenance
-
-- [ ] **Security patches applied promptly**
-  - Upstream security updates reviewed
-  - Patches tested on testnet
-  - Patches deployed to mainnet with change control
-  
-- [ ] **Dependencies updated**
-  - Quarterly dependency audit
-  - Updates tested before deployment
-  - Changelog reviewed for breaking changes
-  
-- [ ] **Key rotation on schedule**
-  - Session keys rotated per policy
-  - Old keys revoked
-  - New keys authorized and deployed
-  
-- [ ] **Procedures updated as needed**
-  - Runbooks kept current
-  - Incident response plan updated
-  - Documentation updated for new features
-
----
-
-## Sign-Off
-
-### Development Team
-
-- [ ] Developer Name: _________________ Date: _________
-- [ ] Developer Name: _________________ Date: _________
-
-### Security Review
-
-- [ ] Security Reviewer: _______________ Date: _________
-- [ ] Security Reviewer: _______________ Date: _________
-
-### DevOps / Deployment
-
-- [ ] DevOps Engineer: ________________ Date: _________
-- [ ] Operations Contact: ______________ Date: _________
-
-### Management Approval
-
-- [ ] Manager: ______________________ Date: _________
-- [ ] Project Lead: __________________ Date: _________
-
----
-
-## Appendix A: Common Integration Patterns
-
-### Pattern 1: Simple Multisig Wallet
-
-```
-User/Signer → Multisig Contract (M-of-N approval)
-           ↓
-        [Signatures collected and verified]
-           ↓
-    Multisig calls vault.deposit(wallet_address, token, amount, unlock_time, penalty)
-           ↓
-    Soroban require_auth() validates multisig contract address
-           ↓
-    Deposit recorded under multisig contract address
-           ↓
-    Only multisig can withdraw (via subsequent M-of-N approval)
-```
-
-**When to use**: Traditional multisig wallets, organizations, joint accounts
-
-### Pattern 2: Relayer-Funded Deposit
-
-```
-User (Beneficiary) → Relayer (Payer)
-                  ↓
-          Relayer has tokens
-                  ↓
-    Relayer calls vault.deposit_for(relayer, beneficiary, token, amount, unlock_time, penalty)
-                  ↓
-    Soroban require_auth() validates relayer address
-                  ↓
-    Tokens transferred from relayer to vault
-                  ↓
-    Deposit recorded under beneficiary address
-                  ↓
-    Only beneficiary can withdraw
-```
-
-**When to use**: Onboarding flows, gifting, subsidy programs
-
-### Pattern 3: Session Key Gasless Deposits
-
-```
-Wallet → Wallet authorizes Session Key
-      ↓
-   Wallet calls vault.authorize_session_key(wallet, session_key, expires_at)
-      ↓
-   [Session key active for bounded period]
-      ↓
-   Session Key calls vault.deposit_with_session_key(session_key, wallet, token, amount, unlock_time, penalty)
-      ↓
-   Soroban checks: session_key authorized for wallet? Yes. Expired? No.
-      ↓
-   Tokens transferred from session key to vault
-      ↓
-   Deposit recorded under wallet address
-      ↓
-   Wallet can later revoke: vault.revoke_session_key(wallet, session_key)
-```
-
-**When to use**: Gasless deposits, relayed operations, delegated funding
-
-### Pattern 4: Account Abstraction with Entry Point
-
-```
-User → AA Entry Point → AA Wallet → AA Wallet authorizes entry point call
-    ↓                  ↓              ↓
-    └──────────────────┴──────────────┘
-                       ↓
-          Entry point calls vault.deposit(aa_wallet_address, token, amount, unlock_time, penalty)
-                       ↓
-          Soroban require_auth() validates AA wallet address (entry point is authorized by AA)
-                       ↓
-          Tokens transferred from AA wallet to vault
-                       ↓
-          Deposit recorded under AA wallet address
-                       ↓
-          AA wallet maintains full control and can authorize future operations
-```
-
-**When to use**: Account abstraction architectures, custom authorization logic, advanced wallets
-
----
-
-## Appendix B: Security Incident Response
-
-### Compromised Session Key
-
-**Symptoms**: Unauthorized deposits appearing under wallet
-
-**Response**:
-1. [ ] Immediately revoke the compromised session key
-2. [ ] Review all deposits created by the key (identify unauthorized ones)
-3. [ ] If pending unlock: mark deposit as locked pending investigation
-4. [ ] If unlockable: consider early withdrawal with penalty
-5. [ ] Rotate affected wallet's session keys
-6. [ ] Investigate root cause (key leak, unauthorized delegation, etc.)
-7. [ ] Notify affected users
-8. [ ] Update key management procedures
-
-### Unauthorized Withdrawal Attempt
-
-**Symptoms**: Failed authorization logs from unauthorized address attempting withdrawal
-
-**Response**:
-1. [ ] Verify no unauthorized withdrawal occurred (check deposit state)
-2. [ ] If withdrawal succeeded: investigate authorization bypass (potential critical bug)
-3. [ ] If withdrawal failed: log and monitor (normal behavior)
-4. [ ] If attempted by known wallet address: contact wallet owner
-5. [ ] Document incident and pattern
-6. [ ] Review code for authorization bypass vectors
-
-### Authorization Bypass Detection
-
-**Symptoms**: State mutation without proper authorization
-
-**Response**:
-1. [ ] **PAUSE deployment immediately** (if possible)
-2. [ ] Investigate authorization logic
-3. [ ] Check logs for other exploits
-4. [ ] Identify affected deposits/users
-5. [ ] Notify security team and leadership
-6. [ ] Deploy patch/hotfix
-7. [ ] Conduct post-mortem
-8. [ ] Update testing to prevent recurrence
-
----
-
-## Appendix C: Useful Resources
-
-### Soroban Documentation
-- [Soroban Authorization](https://developers.stellar.org/docs/build/smart-contracts/authorization)
-- [Soroban Core Concepts](https://developers.stellar.org/docs/build/smart-contracts)
-- [Stellar Network Guide](https://developers.stellar.org/docs/learn/fundamentals)
-
-### Smart Wallet Resources
-- [Safe Smart Account](https://safe.global/)
-- [EIP-4337 Account Abstraction](https://eips.ethereum.org/EIPS/eip-4337) (for reference)
-- [SAFE-HAVEN Smart Wallet Integration Guide](./SMART_WALLETS.md)
-- [SAFE-HAVEN Smart Wallet Test Suite](./SMART_WALLET_TESTING.md)
-
-### Security Resources
-- [OWASP Smart Contract Security](https://cheatsheetseries.owasp.org/cheatsheets/Cryptocurrency_Developers_Cheatsheet.html)
-- [Stellar Security Best Practices](https://developers.stellar.org/docs/learn/fundamentals/security)
-
-### Testing Resources
-- [Soroban Test Framework](https://developers.stellar.org/docs/build/smart-contracts/testing)
-- [Rust Testing](https://doc.rust-lang.org/book/ch11-00-testing.html)
-
----
-
-## Document History
-
-| Version | Date | Author | Changes |
-|---------|------|--------|---------|
-| 1.0 | 2024 | SAFE-HAVEN Team | Initial checklist document |
-| | | | Includes authorization, session keys, multisig, AA patterns |
-| | | | Comprehensive security audit section |
-| | | | Pre-deployment and operations guidance |
-
----
-
-## Questions or Feedback?
-
-For questions about this checklist:
-1. Review the [SMART_WALLETS.md](./SMART_WALLETS.md) integration guide
-2. Check the [SMART_WALLET_TESTING.md](./SMART_WALLET_TESTING.md) test examples
-3. Open an issue on the SAFE-HAVEN repository
-4. Contact the SAFE-HAVEN security team

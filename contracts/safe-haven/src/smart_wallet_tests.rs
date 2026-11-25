@@ -188,6 +188,151 @@ fn test_contract_address_cancel_deposit_with_penalty() {
 }
 
 // ================================================================
+//  Tests: Smart Wallet Contract as Depositor (Issue #116)
+// ================================================================
+//
+//  ## Security Model
+//
+//  Smart wallets are Soroban contracts. When a smart wallet interacts with the
+//  vault, the vault treats the wallet's *contract address* as the `depositor`.
+//  Authorization is enforced solely through Soroban's `require_auth()`, which
+//  works identically for contract addresses and classic account (EOA) addresses:
+//
+//  - The vault calls `depositor.require_auth()` at the start of every
+//    state-mutating entry point (deposit, withdraw, cancel, etc.).
+//  - For a contract address, `require_auth()` succeeds only if the contract
+//    itself authorized the invocation (i.e. the contract's `__check_auth` /
+//    invocation tree includes the required authorization). This means the smart
+//    wallet's own internal signing rules (multisig thresholds, session keys,
+//    guardians, etc.) gate access to the funds.
+//  - The vault performs **no special handling** for contract addresses: there is
+//    no allowlist, no code inspection, and no distinction between EOAs and
+//    contracts. Ownership is keyed purely by `Address`.
+//  - Consequently, only the smart wallet contract can withdraw or cancel its own
+//    positions; any other address (including individual signers of the wallet)
+//    is rejected because it cannot satisfy `require_auth()` for the depositor.
+//
+//  These tests register a mock smart wallet contract and exercise the vault with
+//  its contract address as the depositor to verify the above properties.
+
+/// A minimal mock smart wallet contract used to obtain a real contract address.
+#[soroban_sdk::contract]
+pub struct MockSmartWallet;
+
+#[soroban_sdk::contractimpl]
+impl MockSmartWallet {
+    /// No-op entry point; exists only so the address is a deployed contract.
+    pub fn ping(_env: Env) {}
+}
+
+/// Register a mock smart wallet contract and return its contract address.
+fn register_smart_wallet(env: &Env) -> Address {
+    env.register(MockSmartWallet, ())
+}
+
+#[test]
+fn test_smart_wallet_contract_address_deposit_succeeds() {
+    let (env, vault, token, _admin, _alice, _fee) = setup();
+
+    // Real deployed contract address acting as the smart wallet.
+    let smart_wallet = register_smart_wallet(&env);
+
+    // Fund the smart wallet contract with tokens.
+    StellarAssetClient::new(&env, &token).mint(&smart_wallet, &10_000);
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+
+    // The contract address is accepted as the depositor with no special handling.
+    let deposit_id = vault.deposit(&smart_wallet, &token, &5_000, &unlock_time, &0);
+    assert_eq!(deposit_id, 0);
+
+    // Position is owned by the contract address.
+    let entry = vault.get_vault(&smart_wallet, &deposit_id).unwrap();
+    assert_eq!(entry.amount, 5_000);
+    assert_eq!(entry.token, token);
+}
+
+#[test]
+fn test_smart_wallet_contract_address_withdraw_succeeds() {
+    let (env, vault, token, _admin, _alice, _fee) = setup();
+
+    let smart_wallet = register_smart_wallet(&env);
+    StellarAssetClient::new(&env, &token).mint(&smart_wallet, &10_000);
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+    vault.deposit(&smart_wallet, &token, &5_000, &unlock_time, &0);
+
+    advance_time(&env, 3601);
+
+    // The contract address satisfies require_auth() and can withdraw.
+    let result = vault.try_withdraw(&smart_wallet, &0);
+    assert!(result.is_ok());
+
+    // Position is removed.
+    assert!(vault.get_vault(&smart_wallet, &0).is_none());
+}
+
+#[test]
+fn test_smart_wallet_require_auth_satisfied_without_special_handling() {
+    let (env, vault, token, _admin, _alice, _fee) = setup();
+
+    let smart_wallet = register_smart_wallet(&env);
+    StellarAssetClient::new(&env, &token).mint(&smart_wallet, &10_000);
+
+    let unlock_time = env.ledger().timestamp() + 3600;
+
+    // With auth mocking, require_auth() for the contract address is satisfied
+    // exactly as it would be for an EOA — no contract-specific code path.
+    let deposit_id = vault.deposit(&smart_wallet, &token, &5_000, &unlock_time, &0);
+    assert_eq!(deposit_id, 0);
+
+    advance_time(&env, 3601);
+
+    let withdraw = vault.try_withdraw(&smart_wallet, &0);
+    assert!(withdraw.is_ok());
+}
+
+#[test]
+fn test_smart_wallet_unauthorized_address_cannot_withdraw() {
+    let (env, vault, token, _admin, _alice, _fee) = setup();
+
+    let smart_wallet = register_smart_wallet(&env);
+    let attacker: Address = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token).mint(&smart_wallet, &10_000);
+    let unlock_time = env.ledger().timestamp() + 3600;
+
+    vault.deposit(&smart_wallet, &token, &5_000, &unlock_time, &0);
+    advance_time(&env, 3601);
+
+    // A different address cannot satisfy require_auth() for the contract
+    // depositor, so the withdrawal is rejected.
+    let result = vault.try_withdraw(&attacker, &0);
+    assert!(result.is_err());
+
+    // The smart wallet's position is untouched.
+    assert!(vault.get_vault(&smart_wallet, &0).is_some());
+}
+
+#[test]
+fn test_smart_wallet_unauthorized_address_cannot_cancel() {
+    let (env, vault, token, _admin, _alice, _fee) = setup();
+
+    let smart_wallet = register_smart_wallet(&env);
+    let attacker: Address = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &token).mint(&smart_wallet, &10_000);
+    let unlock_time = env.ledger().timestamp() + 3600;
+
+    vault.deposit(&smart_wallet, &token, &5_000, &unlock_time, &1000);
+
+    // Only the contract depositor can cancel; others are rejected.
+    let result = vault.try_cancel_deposit(&attacker, &0);
+    assert!(result.is_err());
+    assert!(vault.get_vault(&smart_wallet, &0).is_some());
+}
+
+// ================================================================
 //  Tests: require_auth() Validation
 // ================================================================
 

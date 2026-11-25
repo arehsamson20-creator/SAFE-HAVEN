@@ -247,6 +247,24 @@ test_full_market_lifecycle() → Create → Bet → Close → Resolve → Claim
 - File: `prediction_market_types.rs` (line 22-31)
 - Function: `create_market()` in `prediction_market.rs` (line 113-173)
 
+#### Outcome List Storage (Issue #100)
+
+Outcome names are stored as an ordered list (2-4 entries) on the `PredictionMarket` struct:
+
+- **Order preserved**: `outcome_names` is stored as a `Vec<String>` in the exact order supplied at creation; index `i` in the vector is the canonical `outcome_id` `i`. Order is never re-sorted or mutated after creation.
+- **Count accurate**: `outcome_count` is derived from `outcome_names.len()` at creation and stored alongside the list, so the count always matches the number of stored outcomes.
+- **Indexable by `outcome_id`**: `get_market_outcome(market_id, outcome_id)` resolves an outcome by its positional ID, and `place_bet`/`resolve_market` validate `outcome_id < outcome_count`.
+- **Included in market queries**: `get_prediction_market(market_id)` returns the full `PredictionMarket` including the ordered `outcome_names` list and `outcome_count`, so callers can enumerate outcomes without extra lookups.
+
+**Tests** (in `prediction_market_test.rs`):
+- `test_outcome_list_two_outcomes` — 2 outcomes stored, order preserved, count == 2
+- `test_outcome_list_three_outcomes` — 3 outcomes stored, order preserved, count == 3
+- `test_outcome_list_four_outcomes` — 4 outcomes stored, order preserved, count == 4
+- `test_outcome_list_order_preserved` — names retrieved by `outcome_id` match creation order
+- `test_outcome_list_included_in_market_query` — `get_prediction_market` returns the ordered list and count
+- `test_outcome_list_invalid_count` — fewer than 2 or more than 4 outcomes rejected
+=======
+
 ### ✅ 2. Users Can Place Bets on Outcomes
 
 **Evidence**:

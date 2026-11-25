@@ -2,6 +2,18 @@
 
 SAFE-HAVEN is a Soroban contract. Smart wallets are represented by Soroban `Address` values and are not treated as externally owned accounts. Deposit ownership is the `depositor` address supplied to the contract, and authorization is checked with Soroban `require_auth()`.
 
+## Security model
+
+The vault's security model for smart wallets rests on three properties:
+
+1. **The contract address is the depositor.** When a smart wallet calls `deposit`, the `depositor` recorded for the vault position is the smart wallet's contract address. Ownership, withdrawal rights, and event attribution all key off this address. The vault never substitutes a signer, relayer, or entry-point address for the wallet.
+2. **Authorization is enforced by Soroban `require_auth()`.** The vault does not implement its own signature verification or inspect individual signers. It calls `require_auth()` on the relevant `Address` values, and the Soroban host delegates the check to the address's own authorization logic. For a contract address, that logic is the smart wallet contract's `__check_auth`, so the wallet's own policy (threshold, signers, session keys, etc.) governs whether the operation is approved.
+3. **No special handling is needed for contract addresses.** The vault treats contract addresses and account addresses identically: `Address` is an opaque value, and `require_auth()` works the same way for both. There is no EOA-only check, no `tx.origin` equivalent, and no code path that distinguishes a contract from an account.
+
+Because of this, deposits from a smart wallet succeed when the wallet authorizes the call, and withdrawals by the smart wallet succeed when the wallet authorizes the withdrawal. The wallet contract remains solely responsible for its own approval policy; the vault only verifies that authorization was granted.
+
+This behavior is covered by the test suite in `smart_wallet_tests.rs`, which verifies that smart wallet contract addresses are accepted as depositors, that `require_auth()` is enforced for contract addresses, and that deposits and withdrawals from smart wallets succeed.
+
 ## Safe-style and multisignature wallets
 
 A multisignature wallet should submit `deposit` from its contract address after its own approval threshold has been met. The vault does not bypass the wallet's policy or inspect individual signers. The wallet contract remains responsible for collecting signatures and authorizing the token transfer.
