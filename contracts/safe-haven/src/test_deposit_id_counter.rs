@@ -516,3 +516,86 @@ fn test_deposit_id_counter_shared_across_deposit_types() {
     assert!(vault.get_ledger_vault(&alice, &1).is_some()); // ledger-based
     assert!(vault.get_vault(&alice, &2).is_some()); // timestamp-based
 }
+
+#[test]
+fn test_failed_ledger_deposit_does_not_increment_counter() {
+    // A deposit_by_ledger that fails validation (gap of 11 ledgers, below the
+    // 12-ledger minimum) must return LockDurationTooShort and must NOT consume
+    // a deposit ID or mutate any state.
+    let (env, vault, token, _admin, alice, _bob) = setup_deposit_id_tests();
+
+    let base_time = env.ledger().timestamp();
+    let current_ledger = env.ledger().sequence();
+
+    // Seed the counter with one successful timestamp-based deposit (ID=0)
+    let id0 = vault.deposit(&alice, &token, &1_000, &(base_time + 3600), &0);
+    assert_eq!(id0, 0);
+
+    // Attempt a ledger-based deposit with a gap of exactly 11 ledgers: rejected
+    let result = vault.try_deposit_by_ledger(
+        &alice,
+        &token,
+        &1_000,
+        &(current_ledger + 11),
+        &0,
+    );
+    assert_eq!(
+        result,
+        Err(Ok(VaultError::LockDurationTooShort)),
+        "Gap of 11 ledgers must be rejected with LockDurationTooShort"
+    );
+
+    // No vault entry should exist for the rejected deposit
+    assert!(vault.get_ledger_vault(&alice, &1).is_none());
+    assert!(vault.get_vault(&alice, &1).is_none());
+
+    // The counter must not have advanced: the next deposit gets ID=1
+    let id1 = vault.deposit(&alice, &token, &1_000, &(base_time + 7200), &0);
+    assert_eq!(
+        id1, 1,
+        "Failed ledger deposit must not consume a deposit ID"
+    );
+
+    // Deposit ID list should only contain the two successful deposits
+    let ids = vault.get_deposit_ids(&alice);
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids.get(0).unwrap(), 0);
+    assert_eq!(ids.get(1).unwrap(), 1);
+}
+
+#[test]
+fn test_far_future_ledger_deposit_increments_shared_counter() {
+    // Ledger-based deposits have no maximum ledger limit (unlike timestamp
+    // deposits, which cap at 5 years). A deposit at u32::MAX must succeed and
+    // increment the shared deposit ID counter exactly once.
+    let (env, vault, token, _admin, alice, _bob) = setup_deposit_id_tests();
+
+    let base_time = env.ledger().timestamp();
+
+    // Seed the counter with a timestamp-based deposit (ID=0)
+    let id0 = vault.deposit(&alice, &token, &1_000, &(base_time + 3600), &0);
+    assert_eq!(id0, 0);
+
+    // Far-future ledger deposit at the maximum u32 value: accepted
+    let id1 = vault.deposit_by_ledger(&alice, &token, &1_000, &u32::MAX, &0);
+    assert_eq!(
+        id1, 1,
+        "Far-future ledger deposit should increment the shared counter to 1"
+    );
+
+    // The ledger vault is retrievable under the new ID
+    let ledger_vault = vault
+        .get_ledger_vault(&alice, &1)
+        .expect("Far-future ledger deposit should be stored");
+    assert_eq!(ledger_vault.amount, 1_000);
+
+    // Counter continues to advance for subsequent deposits of either type
+    let id2 = vault.deposit(&alice, &token, &1_000, &(base_time + 7200), &0);
+    assert_eq!(id2, 2);
+
+    let ids = vault.get_deposit_ids(&alice);
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids.get(0).unwrap(), 0);
+    assert_eq!(ids.get(1).unwrap(), 1);
+    assert_eq!(ids.get(2).unwrap(), 2);
+}

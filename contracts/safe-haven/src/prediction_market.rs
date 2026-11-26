@@ -92,9 +92,13 @@ pub fn create_market(
 ) -> Result<u32, PredictionMarketError> {
     creator.require_auth();
 
+    // Load config from persistent storage so the pause flag survives across
+    // invocations. `initialize_markets` seeds `paused: false`.
     let config = storage::get_market_config(env)
         .ok_or(PredictionMarketError::InternalError)?;
 
+    // Pause enforcement: reject new market creation before any timing
+    // validation or state writes occur.
     if config.paused {
         return Err(PredictionMarketError::MarketPaused);
     }
@@ -457,6 +461,43 @@ pub fn claim_winnings(
 // ================================================================
 
 /// Cancel a market and refund all bets
+
+/// Claim a refund for a bet placed on a cancelled market (Issue #93).
+pub fn claim_refund(
+    env: &Env,
+    bettor: Address,
+    market_id: u32,
+    outcome_id: u32,
+    token: Address,
+) -> Result<i128, PredictionMarketError> {
+    bettor.require_auth();
+
+    let market = storage::get_market(env, market_id)
+        .ok_or(PredictionMarketError::MarketNotFound)?;
+
+    if market.status != MarketStatus::Cancelled {
+        return Err(PredictionMarketError::InvalidMarketStatus);
+    }
+
+    let mut bet = storage::get_bet(env, market_id, outcome_id, &bettor)
+        .ok_or(PredictionMarketError::BetNotFound)?;
+
+    // Double claim prevention (Issue #91)
+    if bet.claimed {
+        return Err(PredictionMarketError::BetsAlreadyClaimed);
+    }
+
+    let refund_amount = bet.amount;
+    bet.claimed = true;
+    storage::set_bet(env, market_id, outcome_id, &bettor, &bet);
+
+    let token_client = token::Client::new(env, &token);
+    token_client.transfer(&env.current_contract_address(), &bettor, &refund_amount);
+
+    events::winnings_claimed(env, market_id, &bettor, refund_amount, 0);
+    Ok(refund_amount)
+}
+
 pub fn cancel_market(
     env: &Env,
     admin: Address,
@@ -537,8 +578,17 @@ pub fn get_market_details(env: &Env, market_id: u32) -> Option<PredictionMarket>
     storage::get_market_readonly(env, market_id)
 }
 
-/// Get outcome details
+/// Get outcome details (Issue #96).
+///
+/// Returns the stored `MarketOutcome` for the given `(market_id, outcome_id)`,
+/// which includes `outcome_id`, `name`, `total_bet_amount` and `bettor_count`.
+/// Returns `None` if the market or the outcome does not exist.
 pub fn get_outcome_details(env: &Env, market_id: u32, outcome_id: u32) -> Option<MarketOutcome> {
+    // Ensure the market exists so we never return a stale/orphaned outcome.
+    let market = storage::get_market_readonly(env, market_id)?;
+    if outcome_id >= market.outcome_count {
+        return None;
+    }
     storage::get_outcome_readonly(env, market_id, outcome_id)
 }
 
@@ -567,6 +617,18 @@ pub fn get_market_with_outcomes(env: &Env, market_id: u32) -> Option<MarketWithO
     let market = storage::get_market_readonly(env, market_id)?;
     let outcomes = storage::get_market_outcomes(env, market_id, market.outcome_count);
     Some(MarketWithOutcomes { market, outcomes })
+}
+
+/// Get a market together with its ordered list of outcomes.
+///
+/// Alias of [`get_market_with_outcomes`] kept for callers that use the
+/// `get_prediction_market` naming. Returns `None` if the market does not exist.
+/// The `outcomes` list is ordered by `outcome_id` and its length equals
+/// `market.outcome_count`.
+pub fn get_prediction_market(env: &Env, market_id: u32) -> Option<MarketWithOutcomes> {
+    get_market_with_outcomes(env, market_id)
+}
+
 // Helper for readonly outcome access
 fn get_outcome_readonly(env: &Env, market_id: u32, outcome_id: u32) -> Option<MarketOutcome> {
     let key = soroban_sdk::Symbol::new(env, &format!("pmo_{}_{}", market_id, outcome_id));

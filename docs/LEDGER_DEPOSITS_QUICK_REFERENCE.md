@@ -28,10 +28,12 @@ Formula: `ledgers = ceil(seconds / 5)`
 
 ## Constraints
 
-- **Minimum lock:** 12 ledgers (~60 seconds)
-- **Maximum lock:** ~10 billion ledgers (~158 years)
+- **Minimum lock:** 12 ledgers (~60 seconds). The gap must satisfy `unlock_ledger > current_ledger + 12`; a gap of exactly 12 ledgers is accepted, 11 or fewer is rejected with `LockDurationTooShort`.
+- **Maximum lock:** None. Ledger-based deposits accept arbitrarily far-future ledger numbers (up to `u32::MAX`, 4,294,967,295). Unlike timestamp-based deposits (which cap at 5 years), there is no upper-bound check — this asymmetry is intentional for flexibility.
 - **Penalty:** 0–10,000 bps (0–100%)
 - **Amount:** > 0, ≤ max_deposit (default 1 trillion)
+
+Validation (including the minimum-gap check) runs before any state mutation, so a rejected deposit leaves no state changes.
 
 ## CLI Quick Start
 
@@ -201,8 +203,7 @@ const isUnlocked = ledgersRemaining === 0;
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| `LockDurationTooShort` | Gap < 12 ledgers | Increase to ≥ 12 |
-| `LockDurationTooLong` | Gap > 10B ledgers | Decrease or use timestamp |
+| `LockDurationTooShort` | Gap < 12 ledgers (i.e. `unlock_ledger <= current_ledger + 12`) | Increase to ≥ 12 |
 | `UnlockTimeNotInFuture` | `unlock_ledger <= current` | Use future ledger |
 | `FundsStillLocked` | `current < unlock_ledger` | Wait or cancel |
 | `NoDepositFound` | ID doesn't exist | Verify deposit ID |

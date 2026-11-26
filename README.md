@@ -1,74 +1,59 @@
-﻿# SAFE-HAVEN
+# Project
 
-[![Rust](https://img.shields.io/badge/Rust-1.81%2B-orange?logo=rust)](https://www.rust-lang.org/)
-[![Soroban SDK](https://img.shields.io/badge/Soroban-SDK%20v22-blue?logo=stellar)](https://github.com/stellar/rs-soroban-sdk)
-[![License](https://img.shields.io/badge/License-MIT-green)](./LICENSE)
-[![Tests](https://github.com/kenedybok3/SAFE-HAVEN/actions/workflows/ci.yml/badge.svg)](https://github.com/kenedybok3/SAFE-HAVEN/actions)
+## Microservices Architecture (Issue #963)
 
-A production-ready decentralized vault on the Stellar blockchain (Soroban) — with a full React/TypeScript frontend.
+This document defines the service boundaries, communication protocol, shared library,
+service discovery, and migration path for extracting services from the monolith.
 
-Tokens are locked in the smart contract until a future timestamp. Early exits are possible with a configurable penalty. Admin rights can be permanently renounced for fully trustless operation.
+### Service Boundaries
 
----
+Services are split along domain boundaries so each can scale and deploy independently:
 
-## Project Structure
+| Service | Domain | Responsibility |
+|---------|--------|----------------|
+| `api-gateway` | Edge | Request routing, auth, rate limiting |
+| `metrics-service` | Observability | Metrics collection and aggregation |
+| `config-service` | Configuration | Centralized config distribution |
+| `backup-service` | Data lifecycle | Backups and disaster recovery |
 
-```
-SAFE-HAVEN/
-├── contracts/safe-haven/       Smart contract (Rust / Soroban)
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs              Crate root
-│       ├── contract.rs         All public entry points
-│       ├── types.rs            VaultKey, VaultEntry, constants
-│       ├── errors.rs           VaultError enum (14 codes)
-│       ├── events.rs           Event emission helpers
-│       ├── storage.rs          Persistent storage + TTL helpers
-│       └── test.rs             48+ unit tests
-│
-├── frontend/                   React + TypeScript + Vite (UI)
-│   ├── src/
-│   │   ├── App.tsx
-│   │   ├── config.ts           Contract ID, RPC URLs
-│   │   ├── context/            Freighter wallet
-│   │   ├── hooks/              useDeposits, useContractInfo
-│   │   ├── lib/                Stellar SDK helpers, formatting
-│   │   ├── components/         Header, TabNav, DepositCard, etc.
-│   │   └── pages/              Dashboard, Deposit, Withdraw, Admin
-│   ├── .env.example
-│   └── README.md
-│
-├── Cargo.toml                  Rust workspace
-├── Makefile                    Build / test / lint / deploy
-└── STRUCTURE.md                Detailed project layout
-```
+Each service owns its data and exposes a versioned API. No service reaches into
+another service's storage directly.
 
----
+### Inter-Service Communication Protocol
 
-## Quick Start
+- **Synchronous:** HTTP/JSON over internal network for request/response calls.
+  - Versioned paths: `/v1/<resource>`
+  - Standard error envelope: `{ "error": { "code": string, "message": string } }`
+  - Health endpoint on every service: `GET /healthz`
+- **Asynchronous:** out of scope for this issue (message queues deferred).
 
-### Smart Contract
+### Shared Library
 
-```bash
-# Prerequisites
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup target add wasm32-unknown-unknown
-cargo install --locked soroban-cli
+Common functionality (config loading, error types, metrics helpers, HTTP client)
+lives in a shared crate consumed by all services to avoid duplication.
 
-# Optional: jq for JSON parsing in smoke tests (apt-get install jq / brew install jq)
+### Service Discovery
 
-# One-shot: install all recommended dev tools
-make install-tools
+- Services register themselves on startup and expose `GET /healthz`.
+- The gateway resolves upstream instances via the discovery registry and performs
+  health-checked load balancing.
+- Discovery is environment-configurable so local and production setups differ only
+  by configuration.
 
-# Build
-make build
+### Migration Path
 
-# Test
-make test
+1. Extract the first service (`metrics-service`) behind the gateway.
+2. Route a percentage of traffic to the extracted service; keep the monolith as fallback.
+3. Extract remaining services one at a time following the same pattern.
+4. Decommission monolith routes once all traffic is served by extracted services.
 
-# Run all tests on file change (requires cargo-watch, installed by make install-tools)
-make watch
+### Acceptance Criteria Mapping
 
+- Service boundaries: defined above.
+- Communication protocol: documented above.
+- Independent deployment: each service has its own build/deploy target.
+- Service discovery: registry + health checks described above.
+- First service extracted: `metrics-service`.
 # Full local dev environment (build + deploy + frontend)
 make dev
 
@@ -240,59 +225,50 @@ Early exit with penalty. Penalty is split: 30% goes to fee_recipient, 70% accumu
 
 ### Staker Registry Functions
 
-The staker registry records a numeric weight and maintains penalty/reward-pool accounting. **The current implementation does not transfer tokens on registration or on reward claims, and the pool is not separated by token.** Read the [Staker Registry User Guide](./docs/STAKER_REGISTRY_GUIDE.md) for the step-by-step registration and claim walkthroughs, exact calculation rules, CLI and TypeScript examples, and FAQ.
+The staker registry records accounting weights and tracks shares of penalties
+from eligible early exits. See the [Staker Registry User Guide](docs/STAKER_REGISTRY_USER_GUIDE.md)
+for registration and claim walkthroughs, CLI and TypeScript SDK examples,
+calculation details, and limitations of the current implementation.
 
 #### `register_staker(staker, amount) -> Result<(), VaultError>`
-Register or update a staker's stake amount.
+Register or replace a staker's accounting weight. This does not transfer or
+escrow tokens.
 
 **Parameters**
 
 | Parameter | Type | Description |
 |---|---|---|
 | `staker` | `Address` | The staker's address. Must sign the transaction. |
-| `amount` | `i128` | Positive numeric weight used in reward calculations; no tokens are transferred. |
+| `amount` | `i128` | Positive accounting weight used in reward calculations. |
 
 **Returns** `Ok(())` on success, or an error code if validation fails.
 
 **Behavior**
 - Validates that `amount > 0` — zero or negative amounts are rejected with `InvalidStakeAmount`.
 - Updates the staker's entry if already registered, or creates a new entry.
-- Maintains `total_staked` (sum of all registered stakes) for proportional reward calculation.
+- Maintains `total_staked` (sum of registered weights) for reward calculations.
 - Adds the staker to the staker list on first registration.
-- Emits a `StakerRegistered` event.
 - Requires authentication from the staker.
 
 **Example**
 ```rust
-// Alice registers with 1000 tokens as stake
+// Alice registers with an accounting weight of 1000
 vault.register_staker(&alice, &1000)?;
 
-// Later, Alice increases her stake to 2000
+// Later, Alice replaces her weight with 2000
 vault.register_staker(&alice, &2000)?;
 ```
 
-#### `get_stakers(offset, limit) -> Page`
-Return a page of staker addresses in registration order. The result includes `total_count`, which is the number of registered stakers across all pages. Registration uses indexed persistent storage so adding stakers does not rewrite the full list.
+#### `withdraw_stake(staker, amount) -> Result<(), VaultError>`
+Reduce or remove a staker's registered amount. This updates `total_staked`; as staking is accounting-only, it does not transfer tokens.
 
-```rust
-let page = vault.get_stakers(&0, &25);
-// page.items contains the first 25 addresses; page.total_count reports all stakers.
-```
-
-#### `get_staker_info(staker) -> Option<StakerInfo>`
-Read a staker's stake amount, rewards, and registration timestamp without modifying contract state. Returns `None` when the address is not registered.
-
-`StakerInfo` contains `stake_amount`, `rewards_earned`, `rewards_claimed`, and `registration_timestamp`. `rewards_earned` is cumulative claimed rewards plus the staker's current proportional share of the unclaimed rewards pool; the unclaimed portion is an estimate and can change as the pool or total stake changes. Legacy registrations without a stored timestamp return `0`.
-
-```rust
-if let Some(info) = vault.get_staker_info(&alice) {
-    // info.stake_amount, info.rewards_earned, info.rewards_claimed
-    // info.registration_timestamp
-}
-```
+- Requires authentication from the staker.
+- The amount must be positive and no greater than the current stake.
+- Withdrawing the full stake removes the active registry entry.
 
 #### `claim_staker_rewards(staker) -> Result<(), VaultError>`
-Claim accumulated rewards from the staker rewards pool.
+Record a claim against the staker rewards pool. The current implementation
+does not transfer tokens and returns unit on success.
 
 **Parameters**
 
@@ -304,20 +280,20 @@ Claim accumulated rewards from the staker rewards pool.
 
 **Behavior**
 - Validates that the staker is registered — returns `StakerNotFound` if not.
-- Calculates `floor(stake_amount × current_rewards_pool / total_staked)` using the pool at claim time.
+- Calculates `floor(stake_amount × current_rewards_pool / total_staked)`.
 - Validates that the calculated reward is > 0 — returns `NoRewardsToClaim` if the pool is empty or the proportion rounds to zero.
 - Deducts the reward from the rewards pool.
 - Tracks cumulative rewards claimed per staker for auditing.
-- Emits a `RewardsClaimed` event. The current implementation does not transfer tokens.
 - Requires authentication from the staker.
 
 **Example**
 ```rust
-// Alice claims her proportional share of the rewards pool
+// Alice records a claim against the rewards pool
 vault.claim_staker_rewards(&alice)?;
 
-// If Alice has weight 1000, total_staked is 4000, and the pool is 700:
+// If Alice has weight 1000, total_staked is 4000, and the current pool is 700:
 // The claim accounting amount is floor(1000 × 700 / 4000) = 175.
+// This does not transfer 175 tokens.
 ```
 
 For limitations, claim-order effects, and the full penalty behavior, see the [Staker Registry User Guide](./docs/STAKER_REGISTRY_GUIDE.md).
@@ -326,7 +302,8 @@ For limitations, claim-order effects, and the full penalty behavior, see the [St
 
 ### Penalty Splitting & Rewards Pool
 
-For timestamp-based and ledger-based single-token deposits, an early `cancel_deposit()` splits the penalty as follows:
+When a user calls `cancel_deposit()` to exit a timestamp- or ledger-based
+deposit early, the penalty is split as follows:
 
 | Recipient | Percentage | Basis Points |
 |---|---|---|
@@ -338,8 +315,11 @@ If a user cancels a deposit with 100 tokens penalty (10% of 1000):
 - Fee Recipient receives 30 tokens (100 × 0.30)
 - Staker Rewards Pool receives 70 tokens (100 × 0.70)
 
-Registered stakers can then claim their proportional share of the rewards pool based on their stake amount relative to total staked.
-Multi-token early cancellation currently sends the full penalty to the fee recipient. Claims update accounting and emit an event but do not transfer tokens; see the [Staker Registry User Guide](./docs/STAKER_REGISTRY_GUIDE.md) for details.
+The staker share is accumulated in a numeric pool without a token identifier.
+The current claim method updates accounting only; it does not transfer tokens.
+Claim amounts use the remaining pool, so the order of claims affects the
+calculation. See the [Staker Registry User Guide](docs/STAKER_REGISTRY_USER_GUIDE.md)
+for the full walkthrough, SDK example, and limitations.
 
 ---
 
@@ -388,12 +368,16 @@ SAFE-HAVEN tracks environmental impact across all deposits to support ESG goals 
 
 ### Carbon Footprint Tracking
 
-Each deposit automatically calculates a **carbon footprint** based on:
+Each supported deposit automatically calculates a **modeled carbon footprint** based on:
 - **Amount locked** — larger deposits = higher impact
 - **Lock duration** — longer locks = higher impact
-- **Baseline multiplier** — configurable environmental cost per unit-second (default: 1 gram CO2e per unit per second)
+- **Baseline multiplier** — `CARBON_BASELINE_PER_UNIT_SECOND` is currently 1 gram CO2e per token base-unit-second
 
 **Formula**: `carbon_footprint = amount × duration_seconds × CARBON_BASELINE_PER_UNIT_SECOND`
+
+For example, 1,000 units locked for 86,400 seconds (one day) gives
+86,400,000 grams CO2e at the current baseline. This is a protocol estimate,
+not a measurement of actual emissions.
 
 ### Renewable Energy Percentage
 
@@ -497,11 +481,11 @@ The contract emits `SustainabilityMilestone` events when depositors achieve envi
 | 13 | `VaultAlreadyUnlocked` | `cancel_deposit` called after the lock has already expired |
 | 14 | `MissingFeeRecipient` | penalty_bps > 0 but no fee_recipient is configured |
 | 15 | `AlreadyInitialized` | `initialize` was called on an already-initialized contract |
-| 16 | `InvalidStakeAmount` | Staker registration with amount <= 0 |
-| 17 | `StakerNotFound` | Staker not registered in the staker registry |
-| 18 | `NoRewardsToClaim` | Rewards pool is empty or staker's share rounds to zero |
-| 19 | `InsufficientStakeAmount` | Insufficient staked amount for operation |
-| 28 | `InvalidRecipient` | Recipient address is invalid or zero address in `withdraw_to()` |
+| 27 | `InvalidStakeAmount` | Stake registration or withdrawal amount <= 0 |
+| 28 | `StakerNotFound` | Staker not registered in the staker registry |
+| 29 | `NoRewardsToClaim` | Rewards pool is empty or staker's share rounds to zero |
+| 30 | `InsufficientStakeAmount` | Withdrawal exceeds the staker's registered stake |
+| 31 | `ArithmeticOverflow` | Stake or reward accounting arithmetic overflowed |
 
 ---
 
@@ -1099,3 +1083,6 @@ MIT
 
 <!-- handsoff-issue-902 -->
 - #902: Issue #11: Withdrawal Fee Calculation Accuracy
+
+<!-- handsoff-issue-970 -->
+- #970: Fix N+1 query problems in report generation

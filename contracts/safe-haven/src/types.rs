@@ -131,6 +131,17 @@ pub enum VaultKey {
     SustainabilityMetrics(Address, u32),
     TotalCarbonFootprint(Address),
     TotalCarbonOffset(Address),
+    /// Per-depositor bitmap of achieved sustainability milestones (issue #830).
+    ///
+    /// Stores a `u32` where each of the 4 low bits represents one milestone:
+    /// - bit 0: first milestone achieved
+    /// - bit 1: second milestone achieved
+    /// - bit 2: third milestone achieved
+    /// - bit 3: fourth milestone achieved
+    ///
+    /// A bit is set exactly once, the first time the corresponding milestone is
+    /// achieved, and is never cleared. This guarantees each milestone event is
+    /// emitted at most once per depositor (no duplicate emissions).
     MilestoneAchieved(Address),
     /// NFT evolution record: maps (depositor, deposit_id) to NFTEvolutionRecord
     NFTEvolution(Address, u32),
@@ -286,6 +297,8 @@ pub struct InsuranceClaim {
     pub amount_requested: i128,
     pub incident_evidence: String,
     pub status: ClaimStatus,
+}
+
 /// Sponsorship fund configuration and state
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -317,6 +330,11 @@ pub struct SessionKeyEntry {
     pub amount_used: i128,
     /// Timestamp when this session key was created
     pub created_at: u64,
+}
+
+/// Sponsorship fund configuration and state
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SponsorshipFund {
     /// Balance of native tokens available for sponsorship
     pub balance: i128,
@@ -589,6 +607,20 @@ pub struct MEVCommitment {
     pub reveal_deadline: u64,
 }
 
+/// MEV status for a deposit tracking the protection lifecycle.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MEVStatus {
+    /// No MEV protection has been initiated.
+    Unprotected,
+    /// Commit has been submitted, awaiting reveal.
+    Committed,
+    /// Commit has been revealed and verified.
+    Revealed,
+    /// Sandwich attack detected after reveal.
+    AttackDetected,
+}
+
 /// MEV detection record when sandwich attack is identified.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -603,20 +635,6 @@ pub struct MEVDetection {
     pub recovery_amount: i128,
     /// Timestamp when detection occurred.
     pub detection_time: u64,
-}
-
-/// MEV status for a deposit tracking the protection lifecycle.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum MEVStatus {
-    /// No MEV protection has been initiated.
-    Unprotected,
-    /// Commit has been submitted, awaiting reveal.
-    Committed,
-    /// Commit has been revealed and verified.
-    Revealed,
-    /// Sandwich attack detected after reveal.
-    AttackDetected,
 }
 
 /// Price sample for TWAP calculation to detect price manipulation.
