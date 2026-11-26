@@ -3540,6 +3540,171 @@ fn test_deposit_by_ledger_lock_duration_too_short_fails() {
     );
 }
 
+// ================================================================
+//  #102 — deposit_by_ledger minimum ledger gap enforcement
+// ================================================================
+
+/// #102 — a gap of exactly MIN_LOCK_LEDGERS (12) ledgers is the minimum
+/// accepted lock duration and must succeed.
+#[test]
+fn test_deposit_by_ledger_gap_exactly_minimum_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    assert_eq!(MIN_LOCK_LEDGERS, 12, "minimum ledger gap must be 12");
+
+    let current_ledger = env.ledger().sequence();
+    let unlock_ledger = current_ledger + MIN_LOCK_LEDGERS;
+
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0);
+
+    let entry = vault
+        .get_ledger_vault(&alice, &id)
+        .expect("ledger deposit should exist");
+    assert_eq!(entry.amount, 1_000);
+    assert_eq!(entry.unlock_ledger, unlock_ledger);
+    assert_eq!(entry.unlock_ledger - current_ledger, 12);
+}
+
+/// #102 — a gap of 11 ledgers (one below the minimum) must be rejected with
+/// LockDurationTooShort.
+#[test]
+fn test_deposit_by_ledger_gap_eleven_ledgers_fails() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let unlock_ledger = env.ledger().sequence() + 11;
+    assert_eq!(
+        vault.try_deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0),
+        Err(Ok(VaultError::LockDurationTooShort))
+    );
+}
+
+/// #102 — the minimum-gap error must be LockDurationTooShort (error code 5).
+#[test]
+fn test_deposit_by_ledger_too_short_returns_error_code_5() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let unlock_ledger = env.ledger().sequence() + 11;
+    let err = vault
+        .try_deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0)
+        .expect_err("should fail");
+    let inner = err.expect("should be a VaultError");
+    assert_eq!(inner as u32, 5, "LockDurationTooShort must be error code 5");
+}
+
+/// #102 — the minimum-gap check fires BEFORE any state mutation: no deposit
+/// entry is stored, the depositor list stays empty and the deposit ID counter
+/// is not advanced (the next successful deposit still gets ID 0).
+#[test]
+fn test_deposit_by_ledger_too_short_creates_no_state() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+
+    let unlock_ledger = env.ledger().sequence() + 11;
+    assert_eq!(
+        vault.try_deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0),
+        Err(Ok(VaultError::LockDurationTooShort))
+    );
+
+    // No deposit stored, no depositor registered, no tokens moved.
+    assert!(vault.get_ledger_vault(&alice, &0).is_none());
+    assert!(vault.get_vault(&alice, &0).is_none());
+    assert_eq!(vault.get_depositor_count(), 0);
+    assert_eq!(vault.get_deposit_ids(&alice).len(), 0);
+    assert_eq!(token_client.balance(&alice), 10_000);
+
+    // The ID counter was not consumed: the next valid deposit gets ID 0.
+    let valid_unlock = env.ledger().sequence() + MIN_LOCK_LEDGERS;
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &valid_unlock, &0);
+    assert_eq!(id, 0);
+}
+
+/// #102 — large gaps (well above the minimum) are accepted.
+#[test]
+fn test_deposit_by_ledger_large_gap_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    for gap in [1_000u32, 100_000u32, 1_000_000u32] {
+        let current_ledger = env.ledger().sequence();
+        let unlock_ledger = current_ledger + gap;
+
+        let id = vault.deposit_by_ledger(&alice, &token, &100, &unlock_ledger, &0);
+        let entry = vault
+            .get_ledger_vault(&alice, &id)
+            .expect("ledger deposit should exist");
+        assert_eq!(entry.unlock_ledger, unlock_ledger);
+        assert_eq!(entry.unlock_ledger - current_ledger, gap);
+    }
+}
+
+// ================================================================
+//  #103 — deposit_by_ledger has no maximum ledger limit
+// ================================================================
+
+/// #103 — unlike timestamp-based deposits (which cap at 5 years), ledger-based
+/// deposits have no upper bound. A far-future unlock ledger must be accepted
+/// and stored verbatim.
+#[test]
+fn test_deposit_by_ledger_far_future_ledger_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let current_ledger = env.ledger().sequence();
+    let unlock_ledger = current_ledger + 10_000_000;
+
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0);
+    let entry = vault
+        .get_ledger_vault(&alice, &id)
+        .expect("ledger deposit should exist");
+    assert_eq!(entry.amount, 1_000);
+    assert_eq!(entry.unlock_ledger, unlock_ledger);
+}
+
+/// #103 — u32::MAX is accepted as an unlock ledger: no maximum check exists
+/// and the arithmetic does not overflow.
+#[test]
+fn test_deposit_by_ledger_max_u32_unlock_ledger_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let unlock_ledger = u32::MAX;
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger, &0);
+
+    let entry = vault
+        .get_ledger_vault(&alice, &id)
+        .expect("ledger deposit should exist");
+    assert_eq!(entry.amount, 1_000);
+    assert_eq!(entry.unlock_ledger, u32::MAX);
+
+    // The deposit stays locked: withdrawal must fail with FundsStillLocked.
+    assert_eq!(
+        vault.try_withdraw(&alice, &id),
+        Err(Ok(VaultError::FundsStillLocked))
+    );
+}
+
+/// #103 — documents the asymmetry: the same far-future horizon is rejected for
+/// timestamp-based deposits (LockDurationTooLong) but accepted for ledger-based
+/// deposits, which intentionally have no maximum.
+#[test]
+fn test_deposit_by_ledger_no_maximum_asymmetry_with_timestamp() {
+    use crate::constants::MAX_LOCK_LEDGERS;
+
+    let (env, vault, token, _admin, alice, _fee) = setup();
+
+    let now = env.ledger().timestamp();
+    let far_unlock_time = now + MAX_LOCK_DURATION_SECS + 1;
+    assert_eq!(
+        vault.try_deposit(&alice, &token, &1_000, &far_unlock_time, &0),
+        Err(Ok(VaultError::LockDurationTooLong))
+    );
+
+    // The ledger-based equivalent (beyond MAX_LOCK_LEDGERS) is accepted.
+    let far_unlock_ledger = env.ledger().sequence() + MAX_LOCK_LEDGERS + 1;
+    let id = vault.deposit_by_ledger(&alice, &token, &1_000, &far_unlock_ledger, &0);
+    let entry = vault
+        .get_ledger_vault(&alice, &id)
+        .expect("ledger deposit should exist");
+    assert_eq!(entry.unlock_ledger, far_unlock_ledger);
+}
+
 // ----------------------------------------------------------------
 //  Fix #7 — initialize must not be callable again after renounce_admin
 // ----------------------------------------------------------------

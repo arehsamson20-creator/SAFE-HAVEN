@@ -324,7 +324,7 @@ pub fn get_outcome_readonly(env: &Env, market_id: u32, outcome_id: u32) -> Optio
 /// Persist the ordered list of outcome names for a market.
 /// Key format: `pmon_{market_id}`
 pub fn set_outcome_names_list(env: &Env, market_id: u32, names: &Vec<String>) {
-    let key = soroban_sdk::Symbol::from_str(env, &format!("pmon_{}", market_id));
+    let key = soroban_sdk::Symbol::new(env, &format!("pmon_{}", market_id));
     env.storage().persistent().set(&key, names);
     env.storage()
         .persistent()
@@ -334,7 +334,7 @@ pub fn set_outcome_names_list(env: &Env, market_id: u32, names: &Vec<String>) {
 /// Retrieve the ordered list of outcome names for a market.
 /// Returns `None` if no names list has been stored for this market.
 pub fn get_outcome_names_list(env: &Env, market_id: u32) -> Option<Vec<String>> {
-    let key = soroban_sdk::Symbol::from_str(env, &format!("pmon_{}", market_id));
+    let key = soroban_sdk::Symbol::new(env, &format!("pmon_{}", market_id));
     let result: Option<Vec<String>> = env.storage().persistent().get(&key);
     if result.is_some() {
         env.storage()
@@ -342,6 +342,23 @@ pub fn get_outcome_names_list(env: &Env, market_id: u32) -> Option<Vec<String>> 
             .extend_ttl(&key, MARKET_BUMP_THRESHOLD, MARKET_BUMP_TARGET);
     }
     result
+}
+
+/// Retrieve a single outcome name by its `outcome_id` index.
+///
+/// Returns `None` if no names list is stored for the market or if
+/// `outcome_id` is out of range.
+pub fn get_outcome_name(env: &Env, market_id: u32, outcome_id: u32) -> Option<String> {
+    get_outcome_names_list(env, market_id).and_then(|names| names.get(outcome_id))
+}
+
+/// Returns the number of stored outcome names for a market.
+///
+/// Returns `0` if no names list has been stored.
+pub fn get_outcome_names_count(env: &Env, market_id: u32) -> u32 {
+    get_outcome_names_list(env, market_id)
+        .map(|names| names.len())
+        .unwrap_or(0)
 }
 
 /// Retrieve all outcomes for a market as an ordered `Vec<MarketOutcome>`.
@@ -361,6 +378,41 @@ pub fn get_market_outcomes(env: &Env, market_id: u32, outcome_count: u32) -> Vec
     outcomes
 }
 
+/// Retrieve all outcomes for a market, ordered by ascending `outcome_id`.
+///
+/// Unlike [`get_market_outcomes`], this variant guarantees the returned
+/// Vec has exactly `market.outcome_count` entries and is ordered by
+/// `outcome_id`. Any outcome slot missing from storage is synthesized
+/// from the stored outcome names list (when available) so the count and
+/// ordering always match the market struct.
+pub fn get_market_outcomes_ordered(env: &Env, market_id: u32) -> Vec<MarketOutcome> {
+    let market = match get_market_readonly(env, market_id) {
+        Some(m) => m,
+        None => return Vec::new(env),
+    };
+
+    let names = get_outcome_names_list(env, market_id);
+    let mut outcomes = Vec::new(env);
+    for i in 0..market.outcome_count {
+        match get_outcome_readonly(env, market_id, i) {
+            Some(outcome) => outcomes.push_back(outcome),
+            None => {
+                let name = names
+                    .as_ref()
+                    .and_then(|n| n.get(i))
+                    .unwrap_or_else(|| String::from_str(env, ""));
+                outcomes.push_back(MarketOutcome {
+                    outcome_id: i,
+                    name,
+                    total_bet: 0,
+                    bettor_count: 0,
+                });
+            }
+        }
+    }
+    outcomes
+}
+
 /// Load all outcomes for a market in ascending `outcome_id` order.
 ///
 /// Convenience wrapper around [`get_market_outcomes`] that derives the
@@ -369,8 +421,5 @@ pub fn get_market_outcomes(env: &Env, market_id: u32, outcome_count: u32) -> Vec
 /// knowing the count up front. Returns an empty Vec if the market does not
 /// exist or has no outcomes stored.
 pub fn get_all_market_outcomes(env: &Env, market_id: u32) -> Vec<MarketOutcome> {
-    match get_market_readonly(env, market_id) {
-        Some(market) => get_market_outcomes(env, market_id, market.outcome_count),
-        None => Vec::new(env),
-    }
+    get_market_outcomes_ordered(env, market_id)
 }

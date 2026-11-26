@@ -43,9 +43,9 @@ cargo test --lib smart_wallet test_require_auth --features testutils
 
 ## Test Suite Structure
 
-### 1. Contract Address as Depositor (5 tests)
+### 1. Contract Address as Depositor (6 tests)
 
-Tests verify that Soroban contract addresses can own vault positions and perform all deposit lifecycle operations.
+Tests verify that Soroban contract addresses can own vault positions and perform all deposit lifecycle operations. This is the core coverage for Issue #116 (Smart Wallet Support — Contract Address as Depositor).
 
 | Test | Purpose | Key Assertion |
 |---|---|---|
@@ -54,15 +54,37 @@ Tests verify that Soroban contract addresses can own vault positions and perform
 | `test_contract_address_cannot_withdraw_before_unlock` | Time lock enforced | Returns `FundsStillLocked` error |
 | `test_contract_address_cancel_deposit_with_penalty` | Early exit with penalty | Deposit removed on cancel |
 | `test_contract_address_multiple_separate_deposits` | Multiple deposits per address | IDs increment correctly |
+| `test_contract_address_require_auth_accepted` | Contract address passes `require_auth()` | Deposit succeeds with contract as `depositor` |
 
 **Key Concepts**:
 - Smart wallet addresses are Soroban contract addresses, not EOAs
 - `require_auth()` mechanism validates the contract address is authorized
 - Deposits are owned by the contract address, not any individual signer
+- No special handling is required for contract addresses: the vault treats them identically to any other `depositor` address, relying solely on Soroban `require_auth()`
 
-### 2. require_auth() Validation (3 tests)
+**Acceptance Criteria Coverage (Issue #116)**:
 
-Tests verify that `require_auth()` is properly enforced at the contract boundary.
+| Criterion | Covered By |
+|---|---|
+| Smart wallet addresses accepted | `test_contract_address_deposit_success`, `test_contract_address_multiple_separate_deposits` |
+| `require_auth()` works with contracts | `test_contract_address_require_auth_accepted`, `test_require_auth_contract_enforced_on_deposit` |
+| Deposits succeed from smart wallets | `test_contract_address_deposit_success` |
+| Withdrawals succeed | `test_contract_address_withdraw_after_unlock` |
+| Security model documented | [Security Assumptions](#security-assumptions) below |
+
+**Running the contract-address tests**:
+
+```bash
+# Run all contract-address-as-depositor tests
+cargo test --lib smart_wallet test_contract_address --features testutils
+
+# Run only the require_auth() contract-address test
+cargo test --lib smart_wallet test_contract_address_require_auth_accepted --features testutils -- --nocapture
+```
+
+### 2. require_auth() Validation (4 tests)
+
+Tests verify that `require_auth()` is properly enforced at the contract boundary, including when the authorized address is a Soroban contract (smart wallet) rather than an EOA.
 
 | Test | Purpose | Key Assertion |
 |---|---|---|
@@ -75,6 +97,8 @@ Tests verify that `require_auth()` is properly enforced at the contract boundary
 - `require_auth()` must be the first call in state-mutating functions
 - Authorization is scoped to the caller's address
 - Depositor-only operations reject unauthorized callers
+- `require_auth()` accepts contract addresses: Soroban resolves authorization for a contract address through the contract's own `__check_auth` implementation, so the vault needs no contract-specific code path
+- The vault never inspects signers; it only verifies that the `depositor` address authorized the invocation
 
 ### 3. Session Keys and Time-Bounded Authorization (6 tests)
 
@@ -248,6 +272,16 @@ The vault does NOT:
 - Recover lost keys
 - Bypass wallet policies
 
+### 1a. Contract Address as Depositor Security Model
+
+Smart wallets interact with the vault using their **contract address** as the `depositor`. The security model is:
+
+- **Authorization via `require_auth()`**: The vault calls `depositor.require_auth()` on every state-mutating operation (deposit, withdraw, cancel). For a contract address, Soroban invokes the contract's `__check_auth` entry point, which enforces the wallet's own policy (multisig threshold, session keys, passkeys, etc.).
+- **No special handling**: The vault has no contract-specific branch. A contract address is treated exactly like any other address; correctness relies on Soroban's authorization framework rather than vault-side logic.
+- **Ownership is the address**: Deposits are keyed by the `depositor` address. Only that address (or a party it explicitly authorizes through `deposit_for`/session keys) can withdraw or cancel.
+- **Trust boundary**: The vault trusts the wallet contract to authorize only legitimate operations. A compromised wallet contract can move its own deposits; it cannot affect deposits owned by other addresses.
+- **Third-party funding**: A relayer or session key may fund a deposit, but ownership and withdrawal rights remain with the wallet contract address.
+
 ### 2. Authorization Model
 
 - `require_auth()` is enforced as the first call in state-mutating functions
@@ -343,6 +377,8 @@ When integrating smart wallets with SAFE-HAVEN:
 
 - [ ] Wallet authorizes both vault invocation and token transfer
 - [ ] Depositor address is the wallet contract address (not relayer)
+- [ ] Wallet contract implements `__check_auth` so `require_auth()` succeeds for the contract address
+- [ ] Contract-address deposit and withdrawal paths verified (`cargo test --lib smart_wallet test_contract_address --features testutils`)
 - [ ] Use `deposit_for` for third-party funding scenarios
 - [ ] Set explicit expiry for all session keys
 - [ ] Revoke session keys when sessions end
@@ -357,7 +393,7 @@ When integrating smart wallets with SAFE-HAVEN:
 
 **Cause**: `require_auth()` check failed
 
-**Solution**: Ensure the caller is the expected address and test uses `env.mock_all_auths()`
+**Solution**: Ensure the caller is the expected address and test uses `env.mock_all_auths()`. For contract addresses, confirm the wallet contract implements `__check_auth`; otherwise `require_auth()` on the contract address cannot be satisfied.
 
 ### Test Fails: "SessionKeyNotAuthorized"
 

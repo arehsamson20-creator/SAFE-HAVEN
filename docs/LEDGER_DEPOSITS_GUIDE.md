@@ -32,8 +32,10 @@ Ledger-based deposits are useful when your lock condition is expressed in terms 
 | **Unlock condition** | `current_time >= unlock_time` | `current_ledger >= unlock_ledger` |
 | **Precision** | Unix seconds (approximate) | Ledger sequence (exact) |
 | **Min lock** | 60 seconds | 12 ledgers (~60 seconds) |
-| **Max lock** | 5 years | ~2 billion ledgers |
+| **Max lock** | 5 years | No maximum (any valid `u32`) |
 | **Use case** | Calendar-based events | Protocol events, block-based timings |
+
+> **Note on asymmetry:** Timestamp-based deposits are capped at a 5-year maximum lock, while ledger-based deposits intentionally have **no upper bound** (any valid `u32` ledger sequence is accepted). See [Minimum and Maximum Locks](#minimum-and-maximum-locks) for details.
 
 ---
 
@@ -592,16 +594,34 @@ unlock_ledger = current_ledger + ledger_gap
 | 1 month (30 days) | 2,592,000 | 518,400 | `2,592,000 ÷ 5` |
 | 1 year | 31,536,000 | 6,307,200 | `31,536,000 ÷ 5` |
 
-### Minimum and Maximum Locks
+### Minimum Lock (12 Ledgers)
 
-SAFE-HAVEN enforces bounds on ledger-based deposits:
+SAFE-HAVEN enforces a **minimum gap of 12 ledgers** (~60 seconds) between the current ledger and the unlock ledger for ledger-based deposits:
 
 ```rust
 const MIN_LOCK_LEDGERS: u32 = 12;      // ~60 seconds
-const MAX_LOCK_LEDGERS: u32 = 10_000_000_000; // ~158 years
 ```
 
-If you attempt to create a deposit with `ledger_gap < 12`, the contract returns `LockDurationTooShort`.
+The check is:
+
+```
+unlock_ledger > current_ledger + 12
+```
+
+- A gap of **exactly 12 ledgers is accepted** (the boundary passes).
+- A gap of **11 ledgers or fewer is rejected** with `VaultError::LockDurationTooShort`.
+- The validation runs **before any state mutation**, so a rejected deposit leaves no vault entry, no token transfer, and no ID consumed.
+
+### No Maximum Lock (Intentional Asymmetry)
+
+Unlike timestamp-based deposits, which are capped at a **5-year maximum**, ledger-based deposits have **no maximum ledger limit**. Any valid `u32` ledger sequence is accepted, including very far-future values such as `2^32 - 1` (4,294,967,295).
+
+This asymmetry is intentional:
+
+- **Timestamp deposits** are bounded by a 5-year maximum to keep wall-clock locks reasonable.
+- **Ledger deposits** are unbounded to support protocol-coordinated events and other ledger-expressed conditions that may be arbitrarily far in the future.
+
+Because ledger sequences are `u32`, the largest possible unlock ledger is `4,294,967,295`, which fits comfortably in the contract's `i128` arithmetic — there is no overflow risk for any valid `u32` value. There is **no** `LockDurationTooLong` check for ledger-based deposits.
 
 ### Practical Calculation Example
 
@@ -768,39 +788,34 @@ await batchDepositToLedger([
 
 **Problem:** You get `VaultError::LockDurationTooShort` when creating a deposit.
 
-**Cause:** `unlock_ledger - current_ledger < 12`
+**Cause:** The ledger gap is too small — the contract requires `unlock_ledger > current_ledger + 12`.
 
-**Solution:** Increase the ledger gap to at least 12 ledgers (~60 seconds):
+**Solution:** Increase the ledger gap to at least 12 ledgers (~60 seconds). Note that a gap of exactly 12 is accepted; 11 or fewer is rejected. The error is raised before any state changes, so nothing is deposited when this fails.
 
 ```typescript
 const currentLedger = (await rpc.getLatestLedger()).sequence;
-const minimumUnlock = currentLedger + 12;  // At least 12 ledgers
 
-// ✓ Correct
+// ✓ Correct: exactly 12 ledgers (minimum accepted)
+const unlockLedger = currentLedger + 12;
+
+// ✓ Correct: larger gaps are fine
 const unlockLedger = currentLedger + 100;  // 100 ledgers from now
 
-// ✗ Incorrect
-const unlockLedger = currentLedger + 5;    // Too short! Only 5 ledgers
+// ✗ Incorrect: only 11 ledgers — rejected with LockDurationTooShort
+const unlockLedger = currentLedger + 11;
 ```
 
-### "LockDurationTooLong" Error
+### No "LockDurationTooLong" for Ledger Deposits
 
-**Problem:** You get `VaultError::LockDurationTooLong` when creating a deposit.
+**Problem:** You expect a maximum-lock error but never get one.
 
-**Cause:** `unlock_ledger - current_ledger > MAX_LOCK_LEDGERS`
-
-**Solution:** Reduce the lock duration or use a timestamp-based deposit for very long locks:
+**Explanation:** Ledger-based deposits have **no maximum ledger limit** — this is intentional. Unlike timestamp-based deposits (capped at 5 years), any valid `u32` unlock ledger is accepted, including far-future values like `2^32 - 1`. There is no `LockDurationTooLong` check for ledger-based deposits, and no overflow occurs for any valid `u32` value.
 
 ```typescript
-// Current max: ~10 billion ledgers (~158 years)
-const maxLockLedgers = 10_000_000_000;
 const currentLedger = (await rpc.getLatestLedger()).sequence;
 
-// ✗ Incorrect: exceeds maximum
-const unlockLedger = currentLedger + 100_000_000_000;
-
-// ✓ Correct: within maximum
-const unlockLedger = currentLedger + 5_000_000_000;
+// ✓ Accepted: far-future ledger (no maximum for ledger deposits)
+const unlockLedger = 4_294_967_295;  // 2^32 - 1
 ```
 
 ### Deposit Not Found

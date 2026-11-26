@@ -582,6 +582,16 @@ pub fn get_market_with_outcomes(env: &Env, market_id: u32) -> Option<MarketWithO
     Some(MarketWithOutcomes { market, outcomes })
 }
 
+/// Get a market together with its ordered list of outcomes.
+///
+/// Alias of [`get_market_with_outcomes`] kept for callers that use the
+/// `get_prediction_market` naming. Returns `None` if the market does not exist.
+/// The `outcomes` list is ordered by `outcome_id` and its length equals
+/// `market.outcome_count`.
+pub fn get_prediction_market(env: &Env, market_id: u32) -> Option<MarketWithOutcomes> {
+    get_market_with_outcomes(env, market_id)
+}
+
 // Helper for readonly outcome access
 fn get_outcome_readonly(env: &Env, market_id: u32, outcome_id: u32) -> Option<MarketOutcome> {
     let key = soroban_sdk::Symbol::new(env, &format!("pmo_{}_{}", market_id, outcome_id));
