@@ -4289,6 +4289,175 @@ fn test_deposit_by_ledger_withdraw_lifecycle() {
 }
 
 // ================================================================
+//  Ledger-based withdrawal: comprehensive ledger check tests
+// ================================================================
+
+/// Test that withdrawal fails exactly 1 ledger before unlock_ledger.
+/// This verifies the check: current_ledger >= unlock_ledger
+#[test]
+fn test_withdraw_ledger_deposit_one_before_unlock_fails() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+
+    let unlock_ledger = env.ledger().sequence() + 10;
+    let id = vault.deposit_by_ledger(&alice, &token, &2_000, &unlock_ledger, &0);
+
+    // Advance to exactly 1 ledger before unlock_ledger
+    advance_ledger(&env, 9);
+    assert_eq!(env.ledger().sequence(), unlock_ledger - 1);
+
+    // Withdrawal must fail with FundsStillLocked
+    assert_eq!(
+        vault.try_withdraw(&alice, &id),
+        Err(Ok(VaultError::FundsStillLocked))
+    );
+
+    // Verify deposit still exists and tokens remain locked
+    assert!(vault.get_ledger_vault(&alice, &id).is_some());
+    assert_eq!(token_client.balance(&alice), 8_000);
+}
+
+/// Test that withdrawal succeeds at exactly unlock_ledger.
+/// This is the boundary condition: current_ledger == unlock_ledger should pass
+#[test]
+fn test_withdraw_ledger_deposit_at_exact_unlock_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+
+    let unlock_ledger = env.ledger().sequence() + 10;
+    let id = vault.deposit_by_ledger(&alice, &token, &2_000, &unlock_ledger, &0);
+
+    // Advance to exactly unlock_ledger
+    advance_ledger(&env, 10);
+    assert_eq!(env.ledger().sequence(), unlock_ledger);
+
+    // Withdrawal must succeed
+    vault.withdraw(&alice, &id);
+
+    // Verify deposit was removed and tokens returned
+    assert!(vault.get_ledger_vault(&alice, &id).is_none());
+    assert_eq!(token_client.balance(&alice), 10_000);
+}
+
+/// Test that withdrawal succeeds many ledgers after unlock_ledger.
+/// Verifies that the check works for large current_ledger values
+#[test]
+fn test_withdraw_ledger_deposit_many_ledgers_after_unlock_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+
+    let unlock_ledger = env.ledger().sequence() + 5;
+    let id = vault.deposit_by_ledger(&alice, &token, &3_000, &unlock_ledger, &0);
+
+    // Advance far beyond unlock_ledger (500 ledgers)
+    advance_ledger(&env, 500);
+    assert!(env.ledger().sequence() > unlock_ledger);
+
+    // Withdrawal must succeed
+    vault.withdraw(&alice, &id);
+
+    // Verify deposit was removed and tokens returned
+    assert!(vault.get_ledger_vault(&alice, &id).is_none());
+    assert_eq!(token_client.balance(&alice), 10_000);
+}
+
+/// Test withdraw_to with ledger deposit at exact unlock_ledger.
+/// Ensures the check is enforced in withdraw_to as well
+#[test]
+fn test_withdraw_to_ledger_deposit_at_exact_unlock_succeeds() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+    let token_client = TokenClient::new(&env, &token);
+
+    let unlock_ledger = env.ledger().sequence() + 8;
+    let id = vault.deposit_by_ledger(&alice, &token, &1_500, &unlock_ledger, &0);
+
+    // Advance to exactly unlock_ledger
+    advance_ledger(&env, 8);
+    assert_eq!(env.ledger().sequence(), unlock_ledger);
+
+    // Withdrawal to recipient must succeed
+    vault.withdraw_to(&alice, &id, &bob);
+
+    // Verify funds arrived at recipient
+    assert_eq!(token_client.balance(&bob), 1_500);
+    assert_eq!(token_client.balance(&alice), 8_500);
+    assert!(vault.get_ledger_vault(&alice, &id).is_none());
+}
+
+/// Test withdraw_to with ledger deposit one ledger before unlock.
+/// Ensures the check is enforced in withdraw_to as well (should fail)
+#[test]
+fn test_withdraw_to_ledger_deposit_before_unlock_fails() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let bob: Address = Address::generate(&env);
+
+    let unlock_ledger = env.ledger().sequence() + 8;
+    let id = vault.deposit_by_ledger(&alice, &token, &1_500, &unlock_ledger, &0);
+
+    // Advance to 1 ledger before unlock
+    advance_ledger(&env, 7);
+    assert_eq!(env.ledger().sequence(), unlock_ledger - 1);
+
+    // Withdrawal to recipient must fail
+    assert_eq!(
+        vault.try_withdraw_to(&alice, &id, &bob),
+        Err(Ok(VaultError::FundsStillLocked))
+    );
+}
+
+/// Test multiple ledger-based deposits with different unlock_ledger values.
+/// Each should respect its own ledger check independently.
+#[test]
+fn test_multiple_ledger_deposits_independent_checks() {
+    let (env, vault, token, _admin, alice, _fee) = setup();
+    let token_client = TokenClient::new(&env, &token);
+
+    let unlock_ledger_1 = env.ledger().sequence() + 5;
+    let unlock_ledger_2 = env.ledger().sequence() + 15;
+    let unlock_ledger_3 = env.ledger().sequence() + 25;
+
+    let id_1 = vault.deposit_by_ledger(&alice, &token, &1_000, &unlock_ledger_1, &0);
+    let id_2 = vault.deposit_by_ledger(&alice, &token, &2_000, &unlock_ledger_2, &0);
+    let id_3 = vault.deposit_by_ledger(&alice, &token, &3_000, &unlock_ledger_3, &0);
+
+    assert_eq!(token_client.balance(&alice), 4_000); // 10_000 - 1_000 - 2_000 - 3_000
+
+    // Advance to unlock_ledger_1
+    advance_ledger(&env, 5);
+
+    // id_1 should succeed, id_2 and id_3 should fail
+    vault.withdraw(&alice, &id_1);
+    assert_eq!(token_client.balance(&alice), 5_000);
+    assert_eq!(
+        vault.try_withdraw(&alice, &id_2),
+        Err(Ok(VaultError::FundsStillLocked))
+    );
+    assert_eq!(
+        vault.try_withdraw(&alice, &id_3),
+        Err(Ok(VaultError::FundsStillLocked))
+    );
+
+    // Advance to unlock_ledger_2
+    advance_ledger(&env, 10);
+
+    // id_2 should succeed, id_3 should fail
+    vault.withdraw(&alice, &id_2);
+    assert_eq!(token_client.balance(&alice), 7_000);
+    assert_eq!(
+        vault.try_withdraw(&alice, &id_3),
+        Err(Ok(VaultError::FundsStillLocked))
+    );
+
+    // Advance to unlock_ledger_3
+    advance_ledger(&env, 10);
+
+    // id_3 should now succeed
+    vault.withdraw(&alice, &id_3);
+    assert_eq!(token_client.balance(&alice), 10_000);
+}
+
+// ================================================================
 //  #89 cancel_deposit on ledger-based deposits
 // ================================================================
 
