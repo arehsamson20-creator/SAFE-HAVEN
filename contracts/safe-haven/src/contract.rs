@@ -5225,6 +5225,17 @@ impl SafeHaven {
     }
 
     /// Claim winnings for a resolved market.
+    /// Claim refund for a bet in a cancelled prediction market (Issue #93).
+    pub fn claim_prediction_refund(
+        env: Env,
+        bettor: Address,
+        market_id: u32,
+        outcome_id: u32,
+        token: Address,
+    ) -> Result<i128, crate::prediction_market_errors::PredictionMarketError> {
+        crate::prediction_market::claim_refund(&env, bettor, market_id, outcome_id, token)
+    }
+
     pub fn claim_prediction_winnings(
         env: Env,
         bettor: Address,
@@ -5641,6 +5652,17 @@ impl SafeHaven {
 
     /// Claim winnings for a resolved market.
     /// Returns the payout amount after fees.
+    /// Claim refund for a bet in a cancelled prediction market (Issue #93).
+    pub fn claim_prediction_refund(
+        env: Env,
+        bettor: Address,
+        market_id: u32,
+        outcome_id: u32,
+        token: Address,
+    ) -> Result<i128, crate::prediction_market_errors::PredictionMarketError> {
+        crate::prediction_market::claim_refund(&env, bettor, market_id, outcome_id, token)
+    }
+
     pub fn claim_prediction_winnings(
         env: Env,
         bettor: Address,
